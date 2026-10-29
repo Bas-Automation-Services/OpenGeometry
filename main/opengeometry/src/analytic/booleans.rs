@@ -2567,15 +2567,7 @@ fn generic_single_closed_loop_boolean(
                 loop_sense,
                 true,
             )?;
-            let loop_bounds = topology_loop_bounds(&out, loop_id, accuracy.intersection)?;
-            for axis in 0..2 {
-                let bounds = out.topology.faces[face as usize].trim.uv_bounds[axis];
-                out.topology.faces[face as usize].trim.uv_bounds[axis] = Interval::new(
-                    bounds.lo.min(loop_bounds[axis].lo),
-                    bounds.hi.max(loop_bounds[axis].hi),
-                )?;
-            }
-            out.topology.faces[face as usize].trim.holes.push(loop_id);
+            add_hole_lifted_into_face(&mut out, face, loop_id, accuracy.intersection)?;
         } else {
             let face = out.topology.faces.len() as u32;
             let loop_id = add_closed_intersection_loop(
@@ -3967,6 +3959,53 @@ fn add_closed_intersection_loop(
     Ok(loop_id)
 }
 
+/// Makes `loop_id` a hole of `face`. The loop's pcurve comes from the
+/// intersection graph's chart, which may sit whole periods away from the
+/// face's own UV window; then the hole's use is lifted into that window, or
+/// the hole lies outside its face's outer loop in UV. A loop that crosses the
+/// face's seam fits no lift and is added unlifted.
+fn add_hole_lifted_into_face(
+    brep: &mut BrepEnvelope,
+    face: u32,
+    loop_id: u32,
+    tolerance: f64,
+) -> Result<(), GeometryError> {
+    let face_record = &brep.topology.faces[face as usize];
+    let window = face_record.trim.uv_bounds;
+    let periods = brep.geometry.surface(face_record.surface)?.charts()
+        [face_record.trim.chart as usize]
+        .periods;
+    let mut loop_bounds = topology_loop_bounds(brep, loop_id, tolerance)?;
+    let mut lift = [0; 2];
+    for axis in 0..2 {
+        let Some(period) = periods[axis] else {
+            continue;
+        };
+        let turns = ((window[axis].lo - loop_bounds[axis].lo) / period).ceil();
+        if loop_bounds[axis].hi + turns * period <= window[axis].hi {
+            loop_bounds[axis] = Interval::new(
+                loop_bounds[axis].lo + turns * period,
+                loop_bounds[axis].hi + turns * period,
+            )?;
+            lift[axis] = turns as i32;
+        }
+    }
+    let start = brep.topology.loops[loop_id as usize].start_halfedge;
+    brep.topology.halfedges[start as usize]
+        .geometry_use
+        .periodic_lift = lift;
+    let face_record = &mut brep.topology.faces[face as usize];
+    for axis in 0..2 {
+        let bounds = face_record.trim.uv_bounds[axis];
+        face_record.trim.uv_bounds[axis] = Interval::new(
+            bounds.lo.min(loop_bounds[axis].lo),
+            bounds.hi.max(loop_bounds[axis].hi),
+        )?;
+    }
+    face_record.trim.holes.push(loop_id);
+    Ok(())
+}
+
 fn offset_sphere_cylinder_boolean(
     sphere: &SphereInput<'_>,
     cylinder: &CylinderInput<'_>,
@@ -4219,19 +4258,11 @@ fn offset_sphere_cylinder_boolean(
         };
         if regions[side] == LoopRegion::Complement {
             let face = selected_faces[side].unwrap();
-            let loop_bounds =
-                intersection_loop_bounds(&graph, branch, side, out.accuracy.intersection)?;
-            for axis in 0..2 {
-                let bounds = out.topology.faces[face as usize].trim.uv_bounds[axis];
-                out.topology.faces[face as usize].trim.uv_bounds[axis] = Interval::new(
-                    bounds.lo.min(loop_bounds[axis].lo),
-                    bounds.hi.max(loop_bounds[axis].hi),
-                )?;
-            }
             let loop_id = add_closed_intersection_loop(
                 &mut out, edge, vertex, face, pcurve, loop_sense, true,
             )?;
-            out.topology.faces[face as usize].trim.holes.push(loop_id);
+            let tolerance = out.accuracy.intersection;
+            add_hole_lifted_into_face(&mut out, face, loop_id, tolerance)?;
         } else {
             let face = out.topology.faces.len() as u32;
             let loop_id = add_closed_intersection_loop(
@@ -12919,6 +12950,77 @@ mod tests {
             assert!(
                 inside > 0.5 * sphere_volume && inside < sphere_volume,
                 "{centre:?}: {inside} of {sphere_volume}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_closed_loop_lifts_the_host_hole_into_its_face_window() {
+        let accuracy = cylinder("accuracy", 0.0, 1.0, false).accuracy;
+        let cone = primitives::cone("cone".into(), Frame3::IDENTITY, 2.0, 2.0, accuracy).unwrap();
+        let cone_volume = volume_at_deflection(&cone, 0.002);
+        // On +y the cone's chart puts the loop at negative longitude, a period
+        // below the lateral face's [0, 2π] window. The first sphere's loop
+        // winds around the sphere's polar axis, the second's doesn't.
+        for (centre, in_both, sphere_only, cone_only, neither) in [
+            (
+                [0.0, 0.9, 0.9],
+                [0.0, 0.8, 0.9],
+                [0.0, 1.2, 0.95],
+                [0.0, 0.4, 0.9],
+                [0.0, 1.3, 1.1],
+            ),
+            (
+                [0.0, 1.42, 1.0],
+                [0.0, 1.196, 0.776],
+                [0.0, 1.5, 1.0],
+                [0.0, 0.5, 0.8],
+                [0.0, 1.8, 1.0],
+            ),
+        ] {
+            let sphere = primitives::sphere(
+                "sphere".into(),
+                Frame3 {
+                    origin: centre,
+                    ..Frame3::IDENTITY
+                },
+                0.35,
+                accuracy,
+            )
+            .unwrap();
+            let sphere_volume = volume_at_deflection(&sphere, 0.002);
+            let union = boolean_brep(&cone, &sphere, BooleanOp::Union, "u".into()).unwrap();
+            let intersection =
+                boolean_brep(&cone, &sphere, BooleanOp::Intersection, "i".into()).unwrap();
+            let difference =
+                boolean_brep(&cone, &sphere, BooleanOp::Subtraction, "d".into()).unwrap();
+            use PointClassification::{Inside as In, Outside as Out};
+            for (result, expected) in [
+                (&union, [In, In, In, Out]),
+                (&intersection, [In, Out, Out, Out]),
+                (&difference, [Out, Out, In, Out]),
+            ] {
+                validate_orientation(&result.brep).unwrap();
+                assert_classifies(
+                    &result.brep,
+                    &[
+                        (in_both, expected[0]),
+                        (sphere_only, expected[1]),
+                        (cone_only, expected[2]),
+                        (neither, expected[3]),
+                    ],
+                );
+            }
+            let union = volume_at_deflection(&union.brep, 0.002);
+            let intersection = volume_at_deflection(&intersection.brep, 0.002);
+            let difference = volume_at_deflection(&difference.brep, 0.002);
+            assert!(
+                (union + intersection - cone_volume - sphere_volume).abs() < 2e-3 * cone_volume,
+                "{centre:?}: {union} + {intersection} != {cone_volume} + {sphere_volume}"
+            );
+            assert!(
+                (difference + intersection - cone_volume).abs() < 2e-3 * cone_volume,
+                "{centre:?}: {difference} + {intersection} != {cone_volume}"
             );
         }
     }
