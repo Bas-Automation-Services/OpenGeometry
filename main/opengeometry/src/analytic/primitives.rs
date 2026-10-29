@@ -227,6 +227,7 @@ impl Builder {
             outer_shell: 0,
             cavity_shells: Vec::new(),
         });
+        self.brep.orient_loops()?;
         self.brep.validate()?;
         super::query::validate_orientation_validated(&self.brep)?;
         Ok(self.brep)

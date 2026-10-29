@@ -491,6 +491,7 @@ pub(super) fn cylinder_half_space_boolean(
         .max(cylinder.brep.revision)
         .checked_add(1)
         .ok_or_else(|| GeometryError::LimitExceeded("boolean revision overflow".into()))?;
+    out.orient_loops()?;
     out.validate()?;
     let inputs = if cylinder_is_a {
         [cylinder.brep, box_.brep]

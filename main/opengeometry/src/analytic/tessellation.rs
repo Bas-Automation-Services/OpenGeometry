@@ -2323,8 +2323,12 @@ mod tests {
     }
     #[test]
     fn cache_misses_when_a_face_sense_differs() {
+        // Flipping one face makes the body invalid; flip all and re-orient.
         assert_inside_the_key(&wall(4.0), |body| {
-            body.topology.faces[0].sense = Orientation::Reverse
+            for face in &mut body.topology.faces {
+                face.sense = Orientation::Reverse;
+            }
+            body.orient_loops().unwrap();
         });
     }
     #[test]

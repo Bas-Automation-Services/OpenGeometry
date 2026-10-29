@@ -133,10 +133,11 @@ fn faces_get_sequential_ids_and_their_sense_can_be_set() {
     let mut b = box_solid([1.0, 1.0, 1.0]).unwrap();
     b.set_face_sense(5, Orientation::Reverse).unwrap();
     assert_eq!(b.brep().topology.faces[5].sense, Orientation::Reverse);
-    // Face 5 now has its material normal pointing into the box.
+    // Face 5 now has its material normal pointing into the box. Turning its
+    // loop to match leaves it running the same way as its neighbours' loops.
     let err = b.finish().unwrap_err();
     assert!(
-        matches!(&err, GeometryError::InvalidTopology(m) if m.contains("'back'") && m.contains("material normal")),
+        matches!(&err, GeometryError::InvalidTopology(m) if m.contains("twins") && m.contains("'back'")),
         "{err:?}"
     );
 }

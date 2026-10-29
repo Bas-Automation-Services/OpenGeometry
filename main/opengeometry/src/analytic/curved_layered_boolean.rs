@@ -1204,6 +1204,7 @@ fn finish(
         .fold(a.revision, |revision, cutter| revision.max(cutter.revision))
         .checked_add(1)
         .ok_or_else(coverage)?;
+    out.orient_loops()?;
     out.validate()?;
     let face_mappings =
         analytic_face_mappings(&out, std::iter::once(a).chain(cutters.iter().copied()));

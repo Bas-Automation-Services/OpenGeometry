@@ -653,7 +653,15 @@ impl BrepEnvelope {
                     || twin.to != h.from
                     || twin.geometry_use.sense == h.geometry_use.sense
                 {
-                    return Err(invalid("inconsistent halfedge twins"));
+                    let key = |f: Option<u32>| {
+                        f.and_then(|f| t.faces.get(f as usize))
+                            .map_or("-", |f| f.key.as_str())
+                    };
+                    return Err(invalid(format!(
+                        "inconsistent halfedge twins between faces '{}' and '{}'",
+                        key(h.face),
+                        key(twin.face)
+                    )));
                 }
             }
             if let Some(next) = h.next {
@@ -977,7 +985,184 @@ impl BrepEnvelope {
         {
             return Err(invalid("closed shell has no solid membership"));
         }
+        for face in &t.faces {
+            if !self.misoriented_loops(face)?.is_empty() {
+                return Err(invalid(format!(
+                    "face {} ('{}') has loops running against its material normal",
+                    face.id, face.key
+                )));
+            }
+        }
         Ok(())
+    }
+
+    /// Turns every face loop to the standard direction: seen against the
+    /// face's material normal (surface normal times `sense`), outer loops run
+    /// counter-clockwise and holes clockwise, so the face lies to the left of
+    /// each loop. Producers may build loops either way and call this before
+    /// `validate()`. A loop is reversed in place (half-edge direction, sense
+    /// and links); pcurves and twins are kept.
+    pub fn orient_loops(&mut self) -> Result<(), GeometryError> {
+        let mut flips = Vec::new();
+        for face in &self.topology.faces {
+            flips.extend(self.misoriented_loops(face)?);
+        }
+        if flips.is_empty() {
+            return Ok(());
+        }
+        for loop_id in flips {
+            let start = self.topology.loops[loop_id as usize].start_halfedge;
+            let mut h = start;
+            loop {
+                let he = &mut self.topology.halfedges[h as usize];
+                std::mem::swap(&mut he.from, &mut he.to);
+                std::mem::swap(&mut he.next, &mut he.prev);
+                he.geometry_use.sense = match he.geometry_use.sense {
+                    Orientation::Forward => Orientation::Reverse,
+                    Orientation::Reverse => Orientation::Forward,
+                };
+                // After the swap, `prev` holds the old `next`.
+                h = he.prev.ok_or_else(|| invalid("nonterminating loop"))?;
+                if h == start {
+                    break;
+                }
+            }
+        }
+        let mut outgoing = vec![None; self.topology.vertices.len()];
+        for he in &self.topology.halfedges {
+            outgoing[he.from as usize].get_or_insert(he.id);
+        }
+        for v in &mut self.topology.vertices {
+            if v.outgoing_halfedge.is_some() {
+                v.outgoing_halfedge = outgoing[v.id as usize];
+            }
+        }
+        Ok(())
+    }
+
+    /// The loops of `face` that run against the standard direction (see
+    /// [`BrepEnvelope::orient_loops`]), measured as signed area in UV. Loops
+    /// that wrap a periodic axis (a band without seam) only have a direction
+    /// relative to each other: of the two, the one with the lower other
+    /// coordinate must run forward. Faces that can't be decided return none.
+    fn misoriented_loops(&self, face: &Face) -> Result<Vec<u32>, GeometryError> {
+        const SAMPLES: usize = 16;
+        let surface = self.geometry.surface(face.surface)?;
+        let periods = surface.charts()[face.trim.chart as usize].periods;
+        let [u, v] = face.trim.uv_bounds;
+        let centre = [(u.lo + u.hi) * 0.5, (v.lo + v.hi) * 0.5];
+        let Ok(normal) = surface.normal_at(centre) else {
+            return Ok(Vec::new());
+        };
+        let jet = surface.derivatives(centre)?;
+        let chart = super::geometry::dot(super::geometry::cross(jet.du, jet.dv), normal);
+        if chart == 0.0 {
+            return Ok(Vec::new());
+        }
+        let material = chart.signum() * face.sense.multiplier();
+
+        struct Winding {
+            id: u32,
+            hole: bool,
+            area: f64,
+            delta: UV,
+            mean: UV,
+        }
+        let mut windings = Vec::new();
+        for &loop_id in std::iter::once(&face.trim.outer).chain(&face.trim.holes) {
+            let start = self.topology.loops[loop_id as usize].start_halfedge;
+            let mut points: Vec<UV> = Vec::new();
+            let mut h = start;
+            loop {
+                let he = &self.topology.halfedges[h as usize];
+                let range = self.topology.edges[he.edge as usize].geometry.range();
+                let pcurve = he
+                    .geometry_use
+                    .pcurve
+                    .ok_or_else(|| invalid("missing face pcurve"))?;
+                for i in 0..=SAMPLES {
+                    let s = i as f64 / SAMPLES as f64;
+                    let s = if he.geometry_use.sense == Orientation::Forward {
+                        s
+                    } else {
+                        1.0 - s
+                    };
+                    let mut uv = self
+                        .geometry
+                        .pcurve_at(pcurve, range.lo + range.width() * s)?;
+                    // Keep the walk continuous across chart seams, also inside
+                    // one pcurve (an intersection pcurve can jump a period).
+                    if let Some(prev) = points.last() {
+                        for j in 0..2 {
+                            if let Some(period) = periods[j] {
+                                uv[j] += ((prev[j] - uv[j]) / period).round() * period;
+                            }
+                        }
+                    }
+                    if i > 0 || points.is_empty() {
+                        points.push(uv);
+                    }
+                }
+                h = he.next.ok_or_else(|| invalid("nonterminating loop"))?;
+                if h == start {
+                    break;
+                }
+            }
+            // ∫ -v du: the signed area for a closed loop.
+            let mut area = 0.0;
+            let mut mean = [0.0; 2];
+            for w in points.windows(2) {
+                area -= 0.5 * (w[0][1] + w[1][1]) * (w[1][0] - w[0][0]);
+                for j in 0..2 {
+                    mean[j] += w[0][j] / (points.len() - 1) as f64;
+                }
+            }
+            let (first, last) = (points[0], points[points.len() - 1]);
+            windings.push(Winding {
+                id: loop_id,
+                hole: self.topology.loops[loop_id as usize].is_hole,
+                area,
+                delta: [last[0] - first[0], last[1] - first[1]],
+                mean,
+            });
+        }
+
+        let wraps = |w: &Winding, j: usize| periods[j].is_some_and(|p| w.delta[j].abs() > 0.5 * p);
+        let mut flips = Vec::new();
+        let mut wrapping = Vec::new();
+        for w in &windings {
+            if wraps(w, 0) || wraps(w, 1) {
+                wrapping.push(w);
+            } else if (w.area * material > 0.0) == w.hole {
+                flips.push(w.id);
+            }
+        }
+        if let [a, b] = wrapping[..] {
+            let axis = match (wraps(a, 0) && wraps(b, 0), wraps(a, 1) && wraps(b, 1)) {
+                (true, false) => Some(0),
+                (false, true) => Some(1),
+                _ => None,
+            };
+            if let Some(j) = axis {
+                // Region between the two loops, counter-clockwise: for a band
+                // in u the lower-v loop runs +u; for a band in v the lower-u
+                // loop runs -v.
+                let other = 1 - j;
+                let (low, high) = if a.mean[other] <= b.mean[other] {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                let forward = if j == 0 { 1.0 } else { -1.0 };
+                if low.delta[j] * material * forward < 0.0 {
+                    flips.push(low.id);
+                }
+                if high.delta[j] * material * forward > 0.0 {
+                    flips.push(high.id);
+                }
+            }
+        }
+        Ok(flips)
     }
 
     fn validate_face_use(
