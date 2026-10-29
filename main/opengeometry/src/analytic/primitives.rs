@@ -9,23 +9,37 @@ use crate::math::interval::Interval;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
-pub(super) struct Use {
+/// One use of an edge in a face loop: the edge, its start and end vertex in
+/// loop order, the sense relative to the edge curve, and the edge's curve in
+/// the face's UV space. Create it with [`boundary`] or [`plane_boundary`].
+pub struct Use {
     edge: u32,
     from: u32,
     to: u32,
     sense: Orientation,
     pcurve: PcurveGeometry,
 }
-pub(super) struct Builder {
+
+/// Builds a single closed analytic solid face by face.
+///
+/// Add vertices and edges first, then faces whose loops reference them. Every
+/// edge must be used by exactly two loops. [`Builder::finish`] puts all faces
+/// in one closed shell and validates the result, so topology or geometry
+/// mistakes come back as a [`GeometryError`] instead of an invalid BRep.
+pub struct Builder {
     pub(super) brep: BrepEnvelope,
 }
 impl Builder {
-    pub(super) fn new(id: String, accuracy: Accuracy) -> Result<Self, GeometryError> {
+    pub fn new(id: String, accuracy: Accuracy) -> Result<Self, GeometryError> {
         Ok(Self {
             brep: BrepEnvelope::new(id, accuracy)?,
         })
     }
-    pub(super) fn vertex(&mut self, p: Point3) -> u32 {
+    /// Read access to the BRep under construction.
+    pub fn brep(&self) -> &BrepEnvelope {
+        &self.brep
+    }
+    pub fn vertex(&mut self, p: Point3) -> u32 {
         let id = self.brep.topology.vertices.len() as u32;
         self.brep.topology.vertices.push(Vertex {
             id,
@@ -35,7 +49,7 @@ impl Builder {
         });
         id
     }
-    pub(super) fn edge(&mut self, curve: CurveGeometry, range: Interval, seam: bool) -> u32 {
+    pub fn edge(&mut self, curve: CurveGeometry, range: Interval, seam: bool) -> u32 {
         let curve_id = self.brep.geometry.curves.len() as u32;
         self.brep.geometry.curves.push(curve);
         self.edge_geometry(
@@ -46,7 +60,7 @@ impl Builder {
             seam,
         )
     }
-    pub(super) fn edge_geometry(&mut self, geometry: EdgeGeometry, seam: bool) -> u32 {
+    pub fn edge_geometry(&mut self, geometry: EdgeGeometry, seam: bool) -> u32 {
         let id = self.brep.topology.edges.len() as u32;
         self.brep.topology.edges.push(Edge {
             id,
@@ -129,23 +143,27 @@ impl Builder {
         });
         Ok(loop_id)
     }
-    pub(super) fn face(
+    /// Adds a face without holes and returns its id. `key` is the face's stable
+    /// name; it is also recorded as the face's provenance key.
+    pub fn face(
         &mut self,
         key: &str,
         surface: SurfaceGeometry,
         bounds: [[f64; 2]; 2],
         uses: Vec<Use>,
-    ) -> Result<(), GeometryError> {
+    ) -> Result<u32, GeometryError> {
         self.face_with_holes(key, surface, bounds, uses, Vec::new())
     }
-    pub(super) fn face_with_holes(
+    /// Adds a face with an outer loop and hole loops and returns its id.
+    /// `bounds` is the UV box of the trimmed region on `surface`.
+    pub fn face_with_holes(
         &mut self,
         key: &str,
         surface: SurfaceGeometry,
         bounds: [[f64; 2]; 2],
         outer_uses: Vec<Use>,
         hole_uses: Vec<Vec<Use>>,
-    ) -> Result<(), GeometryError> {
+    ) -> Result<u32, GeometryError> {
         let surface_id = self.brep.geometry.surfaces.len() as u32;
         self.brep.geometry.surfaces.push(surface);
         let face = self.brep.topology.faces.len() as u32;
@@ -180,9 +198,24 @@ impl Builder {
                 reversed: false,
             },
         });
+        Ok(face)
+    }
+    /// Sets whether the face's material normal follows its surface normal
+    /// (`Forward`) or opposes it (`Reverse`), e.g. for the inside of a tube.
+    pub fn set_face_sense(&mut self, face: u32, sense: Orientation) -> Result<(), GeometryError> {
+        self.brep
+            .topology
+            .faces
+            .get_mut(face as usize)
+            .ok_or(GeometryError::MissingReference {
+                kind: "face".into(),
+                index: face,
+            })?
+            .sense = sense;
         Ok(())
     }
-    pub(super) fn finish(mut self) -> Result<BrepEnvelope, GeometryError> {
+    /// Closes all faces into one shell, adds the solid and validates it.
+    pub fn finish(mut self) -> Result<BrepEnvelope, GeometryError> {
         let faces = (0..self.brep.topology.faces.len() as u32).collect();
         self.brep.topology.shells.push(Shell {
             id: 0,
@@ -198,16 +231,12 @@ impl Builder {
     }
 }
 
-pub(super) fn uv_line(origin: [f64; 2], direction: [f64; 2]) -> PcurveGeometry {
+/// A straight pcurve in a face's UV space.
+pub fn uv_line(origin: [f64; 2], direction: [f64; 2]) -> PcurveGeometry {
     PcurveGeometry::Line2 { origin, direction }
 }
-pub(super) fn boundary(
-    edge: u32,
-    from: u32,
-    to: u32,
-    sense: Orientation,
-    pcurve: PcurveGeometry,
-) -> Use {
+/// One edge use in a face loop, with an explicit UV pcurve.
+pub fn boundary(edge: u32, from: u32, to: u32, sense: Orientation, pcurve: PcurveGeometry) -> Use {
     Use {
         edge,
         from,
@@ -2503,7 +2532,9 @@ pub fn frustum(
     )
 }
 
-pub(super) fn plane_boundary(
+/// One edge use in a loop of a planar face. The UV pcurve is derived from the
+/// edge's line or circle in the face's `frame`.
+pub fn plane_boundary(
     builder: &Builder,
     frame: Frame3,
     edge: u32,
