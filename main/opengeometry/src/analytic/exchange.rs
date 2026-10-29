@@ -5,6 +5,7 @@ use super::{
     BrepEnvelope, CurveGeometry, Frame3, GeometryError, SurfaceGeometry,
 };
 use crate::export::part21::{sanitize_string_literal, Part21Writer};
+use crate::units::LengthUnit;
 use serde::Serialize;
 
 #[derive(Debug, Serialize)]
@@ -350,16 +351,32 @@ pub(super) fn preflight(brep: &BrepEnvelope, scale: f64) -> Result<f64, Geometry
 
 /// Coordinates in the v2 body are metres. Conversion to the selected output unit occurs here once.
 pub fn export_step(brep: &BrepEnvelope, unit: &str) -> Result<(String, StepReport), GeometryError> {
-    brep.validate()?;
-    let scale = match unit {
-        "metre" => 1.0,
-        "millimetre" => 1000.0,
+    let file = match unit {
+        "metre" => LengthUnit::Metre,
+        "millimetre" => LengthUnit::Millimetre,
         _ => {
             return Err(GeometryError::InvalidGeometry(
                 "STEP length unit must be metre or millimetre".into(),
             ))
         }
     };
+    export_step_in(brep, LengthUnit::Metre, file)
+}
+
+/// Like [`export_step`], for a body whose coordinates are in `model` units
+/// (e.g. a mechanical model built in millimetres). The file states `file`,
+/// which must be an SI unit.
+pub fn export_step_in(
+    brep: &BrepEnvelope,
+    model: LengthUnit,
+    file: LengthUnit,
+) -> Result<(String, StepReport), GeometryError> {
+    brep.validate()?;
+    let prefix = file.step_si_prefix().ok_or_else(|| {
+        GeometryError::InvalidGeometry("STEP length unit must be an SI unit".into())
+    })?;
+    let unit = file.name();
+    let scale = model.conversion_factor_to(file);
     let mut exchange_bound = preflight(brep, scale)?;
     let fitting_budget = brep.accuracy.exchange - exchange_bound;
     let mut writer = Part21Writer::new("AUTOMOTIVE_DESIGN");
@@ -607,7 +624,7 @@ pub fn export_step(brep: &BrepEnvelope, unit: &str) -> Result<(String, StepRepor
         };
         solids.push(writer.add_entity(expression));
     }
-    let prefix = if unit == "millimetre" { ".MILLI." } else { "$" };
+
     let length = writer.add_entity(format!(
         "(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT({prefix},.METRE.))"
     ));
