@@ -2042,11 +2042,53 @@ fn pcurve_support_surface(geometry: &GeometryStore, pcurve: u32) -> Result<u32, 
     }
 }
 
-fn reframe_sphere_intersection(
-    geometry: &mut GeometryStore,
-    definition: &mut IntersectionDefinition,
+fn intersection_pcurve_side(geometry: &GeometryStore, pcurve: u32) -> Result<usize, GeometryError> {
+    match geometry.pcurves.get(pcurve as usize) {
+        Some(PcurveGeometry::IntersectionSide {
+            side: IntersectionSide::A,
+            ..
+        }) => Ok(0),
+        Some(PcurveGeometry::IntersectionSide {
+            side: IntersectionSide::B,
+            ..
+        }) => Ok(1),
+        _ => Err(GeometryError::InvalidGeometry(
+            "winding intersection loop is missing its support pcurve".into(),
+        )),
+    }
+}
+
+/// A sphere chart in which a closed intersection loop that winds around the
+/// sphere's own polar axis is contractible: the loop stays clear of the new
+/// poles and is centred on longitude π, so it lies inside the open chart
+/// domain (0, 2π) × (-π/2, π/2) and the new poles and seam lie on one side of
+/// it. The inside of the loop in this chart is the region a `Patch` face
+/// bounds; the full sphere in this chart with the loop as a hole is its
+/// `Complement`.
+struct SphereLoopChart {
+    surface: SurfaceGeometry,
+    coordinates: Vec<[f64; 2]>,
+}
+
+impl SphereLoopChart {
+    fn frame_and_radius(&self) -> (Frame3, f64) {
+        match self.surface {
+            SurfaceGeometry::Sphere { frame, radius } => (frame, radius),
+            _ => unreachable!("sphere loop chart always holds a sphere"),
+        }
+    }
+
+    /// A point on the sphere inside the loop, i.e. on the `Patch` side.
+    fn patch_sample(&self) -> Result<Point3, GeometryError> {
+        self.surface.point_at(polygon_centroid(&self.coordinates))
+    }
+}
+
+fn sphere_loop_chart(
+    geometry: &GeometryStore,
+    definition: &IntersectionDefinition,
     side: usize,
-) -> Result<(), GeometryError> {
+) -> Result<SphereLoopChart, GeometryError> {
     let surface_id = definition.surfaces[side];
     let (frame, radius) = match geometry.surface(surface_id)? {
         SurfaceGeometry::Sphere { frame, radius } => (*frame, *radius),
@@ -2113,11 +2155,55 @@ fn reframe_sphere_intersection(
             }
         }
     }
-    let (_, candidate, coordinates) = best.ok_or_else(|| GeometryError::CoverageGap {
+    let (_, candidate, mut coordinates) = best.ok_or_else(|| GeometryError::CoverageGap {
         families: ["sphere".into(), "unresolved periodic winding".into()],
     })?;
-    geometry.surfaces[surface_id as usize] = candidate;
-    for (anchor, uv) in definition.anchors.iter_mut().zip(&coordinates) {
+    // Turn the chart about its polar axis so the loop is centred on longitude
+    // π. Turning the frame by `angle` shifts every longitude by `-angle`.
+    let (lo, hi) = coordinates
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), uv| {
+            (lo.min(uv[0]), hi.max(uv[0]))
+        });
+    if hi - lo >= std::f64::consts::TAU {
+        return Err(GeometryError::CoverageGap {
+            families: ["sphere".into(), "unresolved periodic winding".into()],
+        });
+    }
+    let angle = 0.5 * (lo + hi) - std::f64::consts::PI;
+    let SurfaceGeometry::Sphere { frame, .. } = candidate else {
+        unreachable!("sphere chart candidates are spheres")
+    };
+    let (sin, cos) = angle.sin_cos();
+    let x = add(scale(frame.x, cos), scale(frame.y, sin));
+    let frame = Frame3 {
+        origin: frame.origin,
+        x,
+        y: cross(frame.z, x),
+        z: frame.z,
+    };
+    frame.validate()?;
+    for uv in &mut coordinates {
+        uv[0] -= angle;
+    }
+    Ok(SphereLoopChart {
+        surface: SurfaceGeometry::Sphere { frame, radius },
+        coordinates,
+    })
+}
+
+/// Moves `definition`'s `side` onto `chart`, replacing that side's support
+/// surface in `geometry` by the chart's sphere.
+fn reframe_sphere_intersection(
+    geometry: &mut GeometryStore,
+    definition: &mut IntersectionDefinition,
+    side: usize,
+    chart: &SphereLoopChart,
+) -> Result<(), GeometryError> {
+    let (_, radius) = chart.frame_and_radius();
+    geometry.surfaces[definition.surfaces[side] as usize] = chart.surface.clone();
+    let coordinates = &chart.coordinates;
+    for (anchor, uv) in definition.anchors.iter_mut().zip(coordinates) {
         if side == 0 {
             anchor.uv_a = *uv;
         } else {
@@ -2199,16 +2285,37 @@ fn generic_single_closed_loop_boolean(
     }
     let inputs = [a, b];
     let face_ids = pair.faces;
-    let loop_inside_other = [
-        classify_point(
-            b,
-            graph.geometry.surfaces[0].point_at(intersection_loop_sample(graph, branch, 0)?)?,
-        )?,
-        classify_point(
-            a,
-            graph.geometry.surfaces[1].point_at(intersection_loop_sample(graph, branch, 1)?)?,
-        )?,
-    ];
+    // A loop that winds around a sphere's polar axis has no inside in that
+    // sphere's chart: its UV centroid lies on neither cap in particular. Such a
+    // side is built in a chart where the loop is contractible, so the Patch and
+    // Complement it selects must be classified in that same chart.
+    let mut sphere_charts: [Option<SphereLoopChart>; 2] = [None, None];
+    for side in 0..2 {
+        if windings[side] == [0, 0] {
+            continue;
+        }
+        let CurveGeometry::Intersection { definition } =
+            graph.geometry.curves[branch.curve as usize]
+        else {
+            return Err(GeometryError::InvalidGeometry(
+                "winding closed loop requires an intersection curve".into(),
+            ));
+        };
+        sphere_charts[side] = Some(sphere_loop_chart(
+            &graph.geometry,
+            &graph.geometry.intersections[definition as usize],
+            intersection_pcurve_side(&graph.geometry, branch.pcurves[side])?,
+        )?);
+    }
+    let patch_inside_other = |side: usize| -> Result<PointClassification, GeometryError> {
+        let sample = match &sphere_charts[side] {
+            Some(chart) => chart.patch_sample()?,
+            None => graph.geometry.surfaces[side]
+                .point_at(intersection_loop_sample(graph, branch, side)?)?,
+        };
+        classify_point(inputs[1 - side], sample)
+    };
+    let loop_inside_other = [patch_inside_other(0)?, patch_inside_other(1)?];
     if loop_inside_other.iter().any(|classification| {
         matches!(
             classification,
@@ -2233,6 +2340,31 @@ fn generic_single_closed_loop_boolean(
         }
     });
 
+    // The Complement of a winding loop is the full sphere with the loop as a
+    // hole, so the sphere's own seam and poles must move into the loop's chart
+    // too. That is only possible when the input is a plain full sphere.
+    let mut charted_inputs: [Option<BrepEnvelope>; 2] = [None, None];
+    for side in 0..2 {
+        let Some(chart) = &sphere_charts[side] else {
+            continue;
+        };
+        if regions[side] != LoopRegion::Complement {
+            continue;
+        }
+        if full_sphere(inputs[side]).is_err() {
+            return Ok(None);
+        }
+        let (frame, radius) = chart.frame_and_radius();
+        let mut charted = primitives::sphere(
+            inputs[side].id.clone(),
+            frame,
+            radius,
+            inputs[side].accuracy,
+        )?;
+        charted.topology.faces[0].key = inputs[side].topology.faces[0].key.clone();
+        charted_inputs[side] = Some(charted);
+    }
+
     let mut out = BrepEnvelope::new(id, accuracy)?;
     let mut selected_faces = [None; 2];
     let mut selected_surfaces = [None; 2];
@@ -2243,7 +2375,10 @@ fn generic_single_closed_loop_boolean(
         }
         let face_offset = out.topology.faces.len() as u32;
         let shell_offset = out.topology.shells.len() as u32;
-        append_analytic_input(&mut out, inputs[side])?;
+        append_analytic_input(
+            &mut out,
+            charted_inputs[side].as_ref().unwrap_or(inputs[side]),
+        )?;
         let selected_face = face_offset + face_ids[side];
         selected_faces[side] = Some(selected_face);
         selected_surfaces[side] = Some(out.topology.faces[selected_face as usize].surface);
@@ -2322,28 +2457,14 @@ fn generic_single_closed_loop_boolean(
                 })?,
             ];
             for side in 0..2 {
-                if windings[side] == [0, 0] {
+                let Some(chart) = &sphere_charts[side] else {
                     continue;
-                }
-                let definition_side = match graph.geometry.pcurves[branch.pcurves[side] as usize] {
-                    PcurveGeometry::IntersectionSide {
-                        side: IntersectionSide::A,
-                        ..
-                    } => 0,
-                    PcurveGeometry::IntersectionSide {
-                        side: IntersectionSide::B,
-                        ..
-                    } => 1,
-                    _ => {
-                        return Err(GeometryError::InvalidGeometry(
-                            "winding intersection loop is missing its support pcurve".into(),
-                        ))
-                    }
                 };
                 reframe_sphere_intersection(
                     &mut out.geometry,
                     &mut definition_geometry,
-                    definition_side,
+                    intersection_pcurve_side(&graph.geometry, branch.pcurves[side])?,
+                    chart,
                 )?;
             }
             let definition = out.geometry.intersections.len() as u32;
@@ -3698,6 +3819,10 @@ fn intersection_loop_sample(
         let parameter = branch.range.lo + branch.range.width() * index as f64 / subdivisions as f64;
         points.push(graph.geometry.pcurve_at(branch.pcurves[side], parameter)?);
     }
+    Ok(polygon_centroid(&points))
+}
+
+fn polygon_centroid(points: &[[f64; 2]]) -> [f64; 2] {
     let mut twice_area = 0.0;
     let mut centroid = [0.0; 2];
     for index in 0..points.len() {
@@ -3709,15 +3834,15 @@ fn intersection_loop_sample(
         centroid[1] += (a[1] + b[1]) * cross;
     }
     if twice_area.abs() <= f64::EPSILON {
-        return Ok([
+        return [
             points.iter().map(|point| point[0]).sum::<f64>() / points.len() as f64,
             points.iter().map(|point| point[1]).sum::<f64>() / points.len() as f64,
-        ]);
+        ];
     }
-    Ok([
+    [
         centroid[0] / (3.0 * twice_area),
         centroid[1] / (3.0 * twice_area),
-    ])
+    ]
 }
 
 fn intersection_loop_bounds(
@@ -9186,6 +9311,7 @@ mod tests {
     use super::*;
     use crate::analytic::{
         geometry::{cross, dot},
+        query::validate_orientation,
         tessellation::tessellate,
     };
     fn sphere(id: &str, center: Point3, radius: f64) -> BrepEnvelope {
@@ -12659,9 +12785,11 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "pre-existing bug: the cone patch of this cone ∩ sphere result is inside-out (its loop runs against the other patch, a point inside the intersection classifies Outside). Found by the loop-winding check; fix in the generic closed-loop boolean."]
-    fn generic_closed_loop_handles_periodic_winding() {
+    /// A cone and a sphere whose centre lies inside the cone, 0.07 from its
+    /// surface: the intersection loop winds once around the sphere's polar
+    /// axis, so it has no inside in the sphere's own chart, and more than half
+    /// of the sphere lies inside the cone.
+    fn cone_and_sphere_with_winding_loop() -> (BrepEnvelope, BrepEnvelope) {
         let accuracy = cylinder("accuracy", 0.0, 1.0, false).accuracy;
         let cone = primitives::cone("cone".into(), Frame3::IDENTITY, 2.0, 2.0, accuracy).unwrap();
         let sphere = primitives::sphere(
@@ -12674,10 +12802,113 @@ mod tests {
             accuracy,
         )
         .unwrap();
+        (cone, sphere)
+    }
+
+    fn assert_classifies(brep: &BrepEnvelope, points: &[(Point3, PointClassification)]) {
+        for (point, expected) in points {
+            assert_eq!(
+                classify_point(brep, *point).unwrap(),
+                *expected,
+                "{} at {point:?}",
+                brep.id
+            );
+        }
+    }
+
+    #[test]
+    fn generic_closed_loop_handles_periodic_winding() {
+        let (cone, sphere) = cone_and_sphere_with_winding_loop();
         let result =
             boolean_brep(&cone, &sphere, BooleanOp::Intersection, "winding".into()).unwrap();
         result.brep.validate().unwrap();
+        validate_orientation(&result.brep).unwrap();
+        assert_classifies(
+            &result.brep,
+            &[
+                // In both.
+                ([1.0, 0.0, 0.8], PointClassification::Inside),
+                ([0.8, 0.0, 0.8], PointClassification::Inside),
+                // In the cone, outside the sphere.
+                ([0.6, 0.0, 0.8], PointClassification::Outside),
+                // In the sphere, outside the cone.
+                ([1.4, 0.0, 0.9], PointClassification::Outside),
+            ],
+        );
         tessellate(&result.brep, 0.01, 2_000_000).unwrap();
+        let sphere_volume = 4.0 / 3.0 * std::f64::consts::PI * 0.35_f64.powi(3);
+        let inside = volume_at_deflection(&result.brep, 0.002);
+        assert!(
+            inside > 0.5 * sphere_volume && inside < sphere_volume,
+            "{inside} of {sphere_volume}"
+        );
+    }
+
+    #[test]
+    fn generic_closed_loop_subtracts_a_cone_from_a_sphere_with_winding_loop() {
+        let (cone, sphere) = cone_and_sphere_with_winding_loop();
+        let result =
+            boolean_brep(&sphere, &cone, BooleanOp::Subtraction, "winding".into()).unwrap();
+        result.brep.validate().unwrap();
+        validate_orientation(&result.brep).unwrap();
+        assert_classifies(
+            &result.brep,
+            &[
+                ([1.4, 0.0, 0.9], PointClassification::Inside),
+                ([1.0, 0.0, 0.8], PointClassification::Outside),
+                ([0.6, 0.0, 0.8], PointClassification::Outside),
+            ],
+        );
+        let intersection =
+            boolean_brep(&cone, &sphere, BooleanOp::Intersection, "winding".into()).unwrap();
+        let whole = volume_at_deflection(&sphere, 0.002);
+        let outside = volume_at_deflection(&result.brep, 0.002);
+        let inside = volume_at_deflection(&intersection.brep, 0.002);
+        assert!(
+            (inside + outside - whole).abs() < 0.01 * whole,
+            "{inside} + {outside} != {whole}"
+        );
+    }
+
+    #[test]
+    fn generic_closed_loop_intersects_a_torus_with_a_sphere_with_winding_loop() {
+        let accuracy = sphere("accuracy", [0.0; 3], 1.0).accuracy;
+        let torus =
+            primitives::torus("torus".into(), Frame3::IDENTITY, 2.0, 0.5, accuracy).unwrap();
+        // Centres inside the tube, 0.05 below its surface, with the sphere's
+        // polar axis pointing through that surface.
+        for (centre, axis) in [
+            ([2.0, 0.0, 0.45], [0.0, 0.0, 1.0]),
+            ([2.45, 0.0, 0.0], [1.0, 0.0, 0.0]),
+        ] {
+            let sphere = primitives::sphere(
+                "sphere".into(),
+                Frame3::from_axis(centre, axis, [0.0, 1.0, 0.0]).unwrap(),
+                0.2,
+                accuracy,
+            )
+            .unwrap();
+            let outward = scale(axis, 0.17);
+            let inward = scale(axis, -0.1);
+            let result =
+                boolean_brep(&torus, &sphere, BooleanOp::Intersection, "winding".into()).unwrap();
+            result.brep.validate().unwrap();
+            validate_orientation(&result.brep).unwrap();
+            assert_classifies(
+                &result.brep,
+                &[
+                    (add(centre, inward), PointClassification::Inside),
+                    (add(centre, outward), PointClassification::Outside),
+                    (add(centre, scale(axis, -0.3)), PointClassification::Outside),
+                ],
+            );
+            let sphere_volume = 4.0 / 3.0 * std::f64::consts::PI * 0.2_f64.powi(3);
+            let inside = volume_at_deflection(&result.brep, 0.001);
+            assert!(
+                inside > 0.5 * sphere_volume && inside < sphere_volume,
+                "{centre:?}: {inside} of {sphere_volume}"
+            );
+        }
     }
 
     #[test]
