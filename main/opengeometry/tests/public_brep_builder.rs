@@ -168,3 +168,23 @@ fn an_edge_used_by_a_third_loop_is_rejected() {
     );
     assert!(matches!(result, Err(GeometryError::InvalidTopology(_))));
 }
+
+#[test]
+fn a_body_built_in_millimetres_exports_unscaled_with_its_own_unit() {
+    use opengeometry::analytic::exchange::export_step_in;
+    use opengeometry::units::LengthUnit;
+    // The box spans x 0..2: the far corner coordinate is 2 in both units.
+    let brep = box_solid([2.0, 3.0, 4.0]).unwrap().finish().unwrap();
+    let (mm, report) =
+        export_step_in(&brep, LengthUnit::Millimetre, LengthUnit::Millimetre).unwrap();
+    assert!(mm.contains("SI_UNIT(.MILLI.,.METRE.)"));
+    assert!(mm.contains("CARTESIAN_POINT('',(2.00000000000000000E0,"));
+    assert!(!mm.contains("2.00000000000000000E3"));
+    assert_eq!(report.length_unit, "millimetre");
+
+    // Default convention: the body is metres, so millimetres scale by 1000.
+    let (scaled, _) = export_step(&brep, "millimetre").unwrap();
+    assert!(scaled.contains("CARTESIAN_POINT('',(2.00000000000000000E3,"));
+
+    assert!(export_step_in(&brep, LengthUnit::Millimetre, LengthUnit::Inch).is_err());
+}
