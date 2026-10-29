@@ -1,5 +1,5 @@
 use super::{
-    geometry::{dot, norm, scale, sub, unit, Surface},
+    geometry::{add, cross, dot, norm, scale, sub, unit, Surface},
     topology::{BrepEnvelope, Face, PcurveGeometry},
     GeometryError, Point3, SurfaceGeometry, UV,
 };
@@ -501,6 +501,80 @@ pub(crate) fn classify_point_in_shell(
         }
     }
     Ok(PointClassification::Unknown)
+}
+
+/// Checks that every face's material normal (surface normal times `sense`)
+/// points out of the solid. Loop winding in this kernel doesn't encode the
+/// material side, so `validate()` can't see a face whose `sense` is flipped;
+/// this probes it geometrically instead. Per face, a point just in front of
+/// the face must not be inside while the point just behind it is outside.
+pub fn validate_orientation(brep: &BrepEnvelope) -> Result<(), GeometryError> {
+    brep.validate()?;
+    validate_orientation_validated(brep)
+}
+
+pub(crate) fn validate_orientation_validated(brep: &BrepEnvelope) -> Result<(), GeometryError> {
+    if brep.solids.is_empty() {
+        return Ok(());
+    }
+    let Some(bounds) = brep.bounds_unchecked()? else {
+        return Ok(());
+    };
+    let diagonal = norm(std::array::from_fn(|i| bounds.axes[i].width()));
+    // Below ~1e-12 of the model size the tolerance is at the edge of f64
+    // precision and point classification stops being reliable.
+    if brep.accuracy.geometric < 1e-12 * diagonal {
+        return Ok(());
+    }
+    let deflection = (0.02 * diagonal).max(4.0 * brep.accuracy.geometric);
+    // A body the tessellator can't mesh (extreme scales, precision limits)
+    // can't be probed either; that is reported by tessellation itself.
+    let mesh = match super::tessellation::tessellate(brep, deflection, 1 << 22) {
+        Ok(mesh) => mesh,
+        Err(GeometryError::LimitExceeded(_) | GeometryError::UnresolvedTessellation(_)) => {
+            return Ok(())
+        }
+        Err(error) => return Err(error),
+    };
+
+    // One probe point per face: the centroid of its largest triangle.
+    let mut probes: Vec<Option<(f64, Point3)>> = vec![None; brep.topology.faces.len()];
+    for (triangle, ids) in mesh.indices.chunks_exact(3).enumerate() {
+        let p: [Point3; 3] = std::array::from_fn(|k| {
+            std::array::from_fn(|j| mesh.positions[ids[k] as usize * 3 + j])
+        });
+        let area = norm(cross(sub(p[1], p[0]), sub(p[2], p[0])));
+        let probe = &mut probes[mesh.triangle_face_ids[triangle] as usize];
+        if probe.is_none_or(|(best, _)| area > best) {
+            *probe = Some((
+                area,
+                std::array::from_fn(|j| (p[0][j] + p[1][j] + p[2][j]) / 3.0),
+            ));
+        }
+    }
+
+    let offset = 100.0 * brep.accuracy.geometric;
+    for (face, probe) in brep.topology.faces.iter().zip(probes) {
+        let Some((_, centroid)) = probe else {
+            continue;
+        };
+        let surface = brep.geometry.surface(face.surface)?;
+        let uv = surface.project(centroid, None)?;
+        let Ok(normal) = surface.normal_at(uv) else {
+            continue;
+        };
+        let step = scale(unit(normal)?, face.sense.multiplier() * offset);
+        let on_face = surface.point_at(uv)?;
+        let front = classify_point_validated(brep, add(on_face, step))?;
+        let back = classify_point_validated(brep, sub(on_face, step))?;
+        if front == PointClassification::Inside && back == PointClassification::Outside {
+            return Err(GeometryError::InvalidTopology(format!(
+                "face {} ('{}') has its material normal pointing into the solid",
+                face.id, face.key
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

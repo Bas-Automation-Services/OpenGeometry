@@ -214,7 +214,8 @@ impl Builder {
             .sense = sense;
         Ok(())
     }
-    /// Closes all faces into one shell, adds the solid and validates it.
+    /// Closes all faces into one shell, adds the solid and validates it,
+    /// including that every face's material normal points out of the solid.
     pub fn finish(mut self) -> Result<BrepEnvelope, GeometryError> {
         let faces = (0..self.brep.topology.faces.len() as u32).collect();
         self.brep.topology.shells.push(Shell {
@@ -227,6 +228,7 @@ impl Builder {
             cavity_shells: Vec::new(),
         });
         self.brep.validate()?;
+        super::query::validate_orientation_validated(&self.brep)?;
         Ok(self.brep)
     }
 }

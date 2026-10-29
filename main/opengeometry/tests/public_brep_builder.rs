@@ -2,7 +2,8 @@
 //! `analytic::primitives::Builder` API.
 
 use opengeometry::analytic::exchange::export_step;
-use opengeometry::analytic::primitives::{plane_boundary, Builder};
+use opengeometry::analytic::primitives::{annular_cylinder, plane_boundary, Builder};
+use opengeometry::analytic::query::validate_orientation;
 use opengeometry::analytic::topology::{Accuracy, Orientation};
 use opengeometry::analytic::{CurveGeometry, Frame3, GeometryError, Point3, SurfaceGeometry};
 use opengeometry::math::interval::Interval;
@@ -132,6 +133,24 @@ fn faces_get_sequential_ids_and_their_sense_can_be_set() {
     let mut b = box_solid([1.0, 1.0, 1.0]).unwrap();
     b.set_face_sense(5, Orientation::Reverse).unwrap();
     assert_eq!(b.brep().topology.faces[5].sense, Orientation::Reverse);
+    // Face 5 now has its material normal pointing into the box.
+    let err = b.finish().unwrap_err();
+    assert!(
+        matches!(&err, GeometryError::InvalidTopology(m) if m.contains("'back'") && m.contains("material normal")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn orientation_check_accepts_reversed_bores_and_thin_plates() {
+    // The bore of a tube is a cylinder face with sense Reverse: valid.
+    let tube =
+        annular_cylinder("tube".into(), Frame3::IDENTITY, 0.5, 1.0, 2.0, accuracy()).unwrap();
+    validate_orientation(&tube).unwrap();
+
+    // A 1 mm sheet, 1000 x 500 mm: probes must not step through the plate.
+    let plate = box_solid([1000.0, 500.0, 1.0]).unwrap().finish().unwrap();
+    validate_orientation(&plate).unwrap();
 }
 
 #[test]
