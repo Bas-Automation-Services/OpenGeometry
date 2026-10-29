@@ -4029,6 +4029,18 @@ fn offset_sphere_cylinder_boolean(
             })
         }
     };
+    // A loop that winds around the sphere's polar axis has no inside in the
+    // sphere's chart; the generic closed-loop Boolean builds that side in a
+    // chart where the loop is contractible.
+    for side in 0..2 {
+        let pcurve = branch.pcurves[side];
+        let surface = pcurve_support_surface(&graph.geometry, pcurve)?;
+        if pcurve_winding(&graph.geometry, surface, pcurve, branch.range)? != [0, 0] {
+            return Err(GeometryError::CoverageGap {
+                families: ["sphere".into(), "cylinder loop winding the sphere".into()],
+            });
+        }
+    }
     let loop_inside_other = [
         classify_point(
             cylinder.brep,
@@ -12909,6 +12921,54 @@ mod tests {
                 "{centre:?}: {inside} of {sphere_volume}"
             );
         }
+    }
+
+    #[test]
+    fn sphere_cylinder_loop_winding_the_sphere_uses_the_generic_closed_loop() {
+        let accuracy = sphere("accuracy", [0.0; 3], 1.0).accuracy;
+        let cylinder =
+            primitives::cylinder("cylinder".into(), Frame3::IDENTITY, 1.0, 2.0, accuracy).unwrap();
+        // The sphere's polar axis points through the cylinder wall, so the
+        // intersection loop winds around it.
+        let sphere = primitives::sphere(
+            "sphere".into(),
+            Frame3::from_axis([0.95, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap(),
+            0.3,
+            accuracy,
+        )
+        .unwrap();
+        let in_both = [0.9, 0.0, 1.0];
+        let sphere_only = [1.15, 0.0, 1.0];
+        let cylinder_only = [0.5, 0.0, 1.0];
+        let intersection =
+            boolean_brep(&cylinder, &sphere, BooleanOp::Intersection, "i".into()).unwrap();
+        validate_orientation(&intersection.brep).unwrap();
+        assert_classifies(
+            &intersection.brep,
+            &[
+                (in_both, PointClassification::Inside),
+                (sphere_only, PointClassification::Outside),
+                (cylinder_only, PointClassification::Outside),
+            ],
+        );
+        let difference =
+            boolean_brep(&sphere, &cylinder, BooleanOp::Subtraction, "d".into()).unwrap();
+        validate_orientation(&difference.brep).unwrap();
+        assert_classifies(
+            &difference.brep,
+            &[
+                (in_both, PointClassification::Outside),
+                (sphere_only, PointClassification::Inside),
+                (cylinder_only, PointClassification::Outside),
+            ],
+        );
+        let whole = volume_at_deflection(&sphere, 0.002);
+        let inside = volume_at_deflection(&intersection.brep, 0.002);
+        let outside = volume_at_deflection(&difference.brep, 0.002);
+        assert!(
+            (inside + outside - whole).abs() < 0.01 * whole,
+            "{inside} + {outside} != {whole}"
+        );
     }
 
     #[test]
