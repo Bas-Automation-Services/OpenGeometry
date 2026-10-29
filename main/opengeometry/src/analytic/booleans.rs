@@ -2797,15 +2797,7 @@ fn generic_multiple_closed_loops_boolean(
                     loop_sense,
                     true,
                 )?;
-                let loop_bounds = topology_loop_bounds(&out, loop_id, accuracy.intersection)?;
-                for axis in 0..2 {
-                    let bounds = out.topology.faces[face as usize].trim.uv_bounds[axis];
-                    out.topology.faces[face as usize].trim.uv_bounds[axis] = Interval::new(
-                        bounds.lo.min(loop_bounds[axis].lo),
-                        bounds.hi.max(loop_bounds[axis].hi),
-                    )?;
-                }
-                out.topology.faces[face as usize].trim.holes.push(loop_id);
+                add_hole_lifted_into_face(&mut out, face, loop_id, accuracy.intersection)?;
             } else {
                 let face = out.topology.faces.len() as u32;
                 let loop_id = add_closed_intersection_loop(
@@ -2979,18 +2971,7 @@ fn generic_two_sided_cutter_band_subtraction(
             Orientation::Forward,
             true,
         )?;
-        let host_bounds = topology_loop_bounds(&out, host_loop, accuracy.intersection)?;
-        for axis in 0..2 {
-            let bounds = out.topology.faces[host_face as usize].trim.uv_bounds[axis];
-            out.topology.faces[host_face as usize].trim.uv_bounds[axis] = Interval::new(
-                bounds.lo.min(host_bounds[axis].lo),
-                bounds.hi.max(host_bounds[axis].hi),
-            )?;
-        }
-        out.topology.faces[host_face as usize]
-            .trim
-            .holes
-            .push(host_loop);
+        add_hole_lifted_into_face(&mut out, host_face, host_loop, accuracy.intersection)?;
         out.topology.faces[host_face as usize].provenance.role = FaceRole::Split;
 
         let cutter_loop = add_closed_intersection_loop(
@@ -3962,8 +3943,10 @@ fn add_closed_intersection_loop(
 /// Makes `loop_id` a hole of `face`. The loop's pcurve comes from the
 /// intersection graph's chart, which may sit whole periods away from the
 /// face's own UV window; then the hole's use is lifted into that window, or
-/// the hole lies outside its face's outer loop in UV. A loop that crosses the
-/// face's seam fits no lift and is added unlifted.
+/// the hole lies outside its face's outer loop in UV. A loop that fits no
+/// lift crosses the face's chart seam: it would cut the seam edges of the
+/// outer loop, which a hole can't, so that is a coverage gap rather than a
+/// face that keeps material inside the loop.
 fn add_hole_lifted_into_face(
     brep: &mut BrepEnvelope,
     face: u32,
@@ -3982,13 +3965,22 @@ fn add_hole_lifted_into_face(
             continue;
         };
         let turns = ((window[axis].lo - loop_bounds[axis].lo) / period).ceil();
-        if loop_bounds[axis].hi + turns * period <= window[axis].hi {
-            loop_bounds[axis] = Interval::new(
-                loop_bounds[axis].lo + turns * period,
-                loop_bounds[axis].hi + turns * period,
-            )?;
-            lift[axis] = turns as i32;
+        if loop_bounds[axis].hi + turns * period > window[axis].hi {
+            return Err(GeometryError::CoverageGap {
+                families: [
+                    "closed intersection loop as a hole".into(),
+                    format!(
+                        "loop crossing the chart seam of face '{}'",
+                        brep.topology.faces[face as usize].key
+                    ),
+                ],
+            });
         }
+        loop_bounds[axis] = Interval::new(
+            loop_bounds[axis].lo + turns * period,
+            loop_bounds[axis].hi + turns * period,
+        )?;
+        lift[axis] = turns as i32;
     }
     let start = brep.topology.loops[loop_id as usize].start_halfedge;
     brep.topology.halfedges[start as usize]
@@ -10616,32 +10608,42 @@ mod tests {
             accuracy,
         )
         .unwrap();
-        for (name, left, right, operation) in [
+        // The crossing sphere sits on +x, across the cylinder's chart seam
+        // and, for the part inside the cylinder, across the sphere's own
+        // seam. Every result that keeps one of those faces with the loop as a
+        // hole is refused; only sphere − cylinder bounds the loop with
+        // patches.
+        for (name, left, right, operation, face) in [
             (
                 "crossing-union",
                 &cylinder_host,
                 &crossing,
                 BooleanOp::Union,
+                "cylinder:lateral",
             ),
             (
                 "crossing-intersection",
                 &cylinder_host,
                 &crossing,
                 BooleanOp::Intersection,
+                "crossing:skin",
             ),
             (
                 "crossing-cylinder-cut",
                 &cylinder_host,
                 &crossing,
                 BooleanOp::Subtraction,
-            ),
-            (
-                "crossing-sphere-cut",
-                &crossing,
-                &cylinder_host,
-                BooleanOp::Subtraction,
+                "cylinder:lateral",
             ),
         ] {
+            assert_seam_coverage_gap(boolean_brep(left, right, operation, name.into()), face);
+        }
+        for (name, left, right, operation) in [(
+            "crossing-sphere-cut",
+            &crossing,
+            &cylinder_host,
+            BooleanOp::Subtraction,
+        )] {
             let result = boolean_brep(left, right, operation, name.into())
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert!(
@@ -10667,8 +10669,13 @@ mod tests {
                 .iter()
                 .any(|curve| matches!(curve, CurveGeometry::Intersection { .. })));
             result.brep.validate().unwrap();
+            validate_orientation(&result.brep).unwrap();
             tessellate(&result.brep, 0.01, 2_000_000)
                 .unwrap_or_else(|error| panic!("{name} tessellation: {error}"));
+            // The cap of the sphere outside the cylinder, integrated
+            // numerically: 0.12248.
+            let cap = volume_at_deflection(&result.brep, 0.002);
+            assert!((cap - 0.12248).abs() < 0.01 * 0.12248, "{name}: {cap}");
         }
     }
     #[test]
@@ -12797,18 +12804,26 @@ mod tests {
             accuracy,
         )
         .unwrap();
-        for operation in [
-            BooleanOp::Union,
-            BooleanOp::Intersection,
-            BooleanOp::Subtraction,
+        // The loop sits across the cone's chart seam (longitude 0), so the
+        // cone can't keep its lateral face with the loop as a hole: union and
+        // cone − sphere are refused. The two results that bound the loop with
+        // patches are exact.
+        for (operation, left, right) in [
+            (BooleanOp::Union, &cone, &sphere),
+            (BooleanOp::Subtraction, &cone, &sphere),
         ] {
-            let result = boolean_brep(
-                &cone,
-                &sphere,
-                operation,
-                format!("sphere-cone-{operation:?}"),
-            )
-            .unwrap_or_else(|error| panic!("{operation:?}: {error}"));
+            assert_seam_coverage_gap(
+                boolean_brep(left, right, operation, format!("{operation:?}")),
+                "cone:lateral",
+            );
+        }
+        let mut volumes = Vec::new();
+        for (operation, left, right) in [
+            (BooleanOp::Intersection, &cone, &sphere),
+            (BooleanOp::Subtraction, &sphere, &cone),
+        ] {
+            let result = boolean_brep(left, right, operation, format!("sphere-cone-{operation:?}"))
+                .unwrap_or_else(|error| panic!("{operation:?}: {error}"));
             assert_eq!(result.brep.solids.len(), 1);
             assert!(result
                 .brep
@@ -12823,8 +12838,29 @@ mod tests {
                 .iter()
                 .all(|face| !face.provenance.sources.is_empty()));
             result.brep.validate().unwrap();
+            validate_orientation(&result.brep).unwrap();
             tessellate(&result.brep, 0.01, 2_000_000)
                 .unwrap_or_else(|error| panic!("{operation:?} tessellation: {error}"));
+            volumes.push(volume_at_deflection(&result.brep, 0.002));
+        }
+        let whole = volume_at_deflection(&sphere, 0.002);
+        assert!(
+            (volumes[0] + volumes[1] - whole).abs() < 0.01 * whole,
+            "{volumes:?} != {whole}"
+        );
+    }
+
+    fn assert_seam_coverage_gap(result: Result<BooleanResult, GeometryError>, face: &str) {
+        match result {
+            Err(GeometryError::CoverageGap { families }) => assert_eq!(
+                families,
+                [
+                    "closed intersection loop as a hole".to_string(),
+                    format!("loop crossing the chart seam of face '{face}'"),
+                ]
+            ),
+            Err(error) => panic!("expected a seam coverage gap, got {error}"),
+            Ok(_) => panic!("expected a seam coverage gap, got a result"),
         }
     }
 
@@ -12885,6 +12921,36 @@ mod tests {
             inside > 0.5 * sphere_volume && inside < sphere_volume,
             "{inside} of {sphere_volume}"
         );
+    }
+
+    #[test]
+    fn winding_loop_across_the_host_seam_is_a_coverage_gap() {
+        // Both spheres sit on +x, so the host keeps its lateral face with a
+        // hole across its chart seam for union and host − sphere. Before the
+        // winding fix these failed with inconsistent twins; they must not
+        // become a solid that keeps the host's material inside the loop.
+        let (cone, sphere_on_cone) = cone_and_sphere_with_winding_loop();
+        let accuracy = sphere("accuracy", [0.0; 3], 1.0).accuracy;
+        let cylinder =
+            primitives::cylinder("cylinder".into(), Frame3::IDENTITY, 1.0, 2.0, accuracy).unwrap();
+        let sphere_on_cylinder = primitives::sphere(
+            "sphere".into(),
+            Frame3::from_axis([0.95, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).unwrap(),
+            0.3,
+            accuracy,
+        )
+        .unwrap();
+        for (host, sphere, face) in [
+            (&cone, &sphere_on_cone, "cone:lateral"),
+            (&cylinder, &sphere_on_cylinder, "cylinder:lateral"),
+        ] {
+            for operation in [BooleanOp::Union, BooleanOp::Subtraction] {
+                assert_seam_coverage_gap(
+                    boolean_brep(host, sphere, operation, format!("{operation:?}")),
+                    face,
+                );
+            }
+        }
     }
 
     #[test]
