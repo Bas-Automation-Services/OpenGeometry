@@ -75,6 +75,21 @@ pub fn placed(
             "placement scale must be positive and finite".into(),
         ));
     }
+    let wrapped = input
+        .geometry
+        .surfaces
+        .iter()
+        .any(|s| matches!(s, SurfaceGeometry::Wrapped { .. }))
+        || input
+            .geometry
+            .curves
+            .iter()
+            .any(|c| matches!(c, CurveGeometry::Wrapped { .. }));
+    if wrapped && scale != 1.0 {
+        return Err(GeometryError::UnsupportedGeometry(
+            "scaling wrapped geometry".into(),
+        ));
+    }
     let mut output = input.clone();
     output.revision = input
         .revision
@@ -111,6 +126,8 @@ pub fn placed(
                 *major_radius *= scale;
                 *minor_radius *= scale;
             }
+            // Scale is 1 here: the flat geometry stays, the wrap moves.
+            SurfaceGeometry::Wrapped { wrap, .. } => transform_frame(&mut wrap.frame),
         }
     }
     for curve in &mut output.geometry.curves {
@@ -133,6 +150,7 @@ pub fn placed(
                 *minor_radius *= scale;
             }
             CurveGeometry::Intersection { .. } => {}
+            CurveGeometry::Wrapped { wrap, .. } => transform_frame(&mut wrap.frame),
         }
     }
     for vertex in &mut output.topology.vertices {

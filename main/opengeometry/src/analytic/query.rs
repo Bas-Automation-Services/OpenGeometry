@@ -1,5 +1,5 @@
 use super::{
-    geometry::{add, cross, dot, norm, scale, sub, unit, Surface},
+    geometry::{add, cross, dot, norm, scale, sub, unit, PatchBounds, Surface},
     topology::{BrepEnvelope, Face, PcurveGeometry},
     GeometryError, Point3, SurfaceGeometry, UV,
 };
@@ -341,6 +341,8 @@ fn support_roots(
                     .collect(),
             )
         }
+        // No implicit form: see wrapped_ray_roots.
+        SurfaceGeometry::Wrapped { .. } => None,
     };
     Ok(result.map(|roots| {
         roots
@@ -348,6 +350,118 @@ fn support_roots(
             .filter(|root| domain.contains(*root))
             .collect()
     }))
+}
+
+/// The ray parameters where o + t d lies in a box, within `domain`.
+fn ray_in_box(bounds: PatchBounds, o: Point3, d: Point3, domain: Interval) -> Option<Interval> {
+    let (mut lo, mut hi) = (domain.lo, domain.hi);
+    for axis in 0..3 {
+        let (a, b) = (bounds.axes[axis].lo, bounds.axes[axis].hi);
+        if d[axis] == 0.0 {
+            if o[axis] < a || o[axis] > b {
+                return None;
+            }
+            continue;
+        }
+        let (mut t0, mut t1) = ((a - o[axis]) / d[axis], (b - o[axis]) / d[axis]);
+        if t0 > t1 {
+            std::mem::swap(&mut t0, &mut t1);
+        }
+        lo = lo.max(t0);
+        hi = hi.min(t1);
+    }
+    Interval::new(lo, hi).ok().filter(|_| lo <= hi)
+}
+
+/// Ray roots on a wrapped surface within a UV box: subdivide while the
+/// surface's conservative box meets the ray, then Newton from each small box.
+/// `None` when the search doesn't settle.
+fn wrapped_ray_roots(
+    surface: &SurfaceGeometry,
+    uv: [Interval; 2],
+    o: Point3,
+    d: Point3,
+    domain: Interval,
+    tolerance: f64,
+) -> Result<Option<Vec<f64>>, GeometryError> {
+    let diagonal = |b: PatchBounds| norm(std::array::from_fn(|i| b.axes[i].width()));
+    let leaf = diagonal(surface.enclose(uv)?) / 64.0;
+    let mut roots: Vec<f64> = Vec::new();
+    let mut stack = vec![(uv, 0usize)];
+    let mut visits = 0usize;
+    while let Some((b, depth)) = stack.pop() {
+        visits += 1;
+        if visits > 50_000 {
+            return Ok(None);
+        }
+        let bounds = surface.enclose(b)?;
+        let Some(span) = ray_in_box(bounds, o, d, domain) else {
+            continue;
+        };
+        if diagonal(bounds) <= leaf || depth >= 24 {
+            let start = [b[0].midpoint(), b[1].midpoint(), span.midpoint()];
+            if let Some([u, v, t]) = ray_newton(surface, start, o, d, tolerance)? {
+                if uv[0].contains(u)
+                    && uv[1].contains(v)
+                    && domain.contains(t)
+                    && roots.iter().all(|r| (r - t).abs() > tolerance)
+                {
+                    roots.push(t);
+                }
+            }
+            continue;
+        }
+        let jet = surface.derivatives([b[0].midpoint(), b[1].midpoint()])?;
+        let axis = usize::from(norm(jet.dv) * b[1].width() > norm(jet.du) * b[0].width());
+        let m = b[axis].midpoint();
+        for half in [Interval::new(b[axis].lo, m)?, Interval::new(m, b[axis].hi)?] {
+            let mut child = b;
+            child[axis] = half;
+            stack.push((child, depth + 1));
+        }
+    }
+    Ok(Some(roots))
+}
+
+/// Solves S(u, v) = o + t d by Newton's method from `start` = (u, v, t).
+fn ray_newton(
+    surface: &SurfaceGeometry,
+    start: [f64; 3],
+    o: Point3,
+    d: Point3,
+    tolerance: f64,
+) -> Result<Option<[f64; 3]>, GeometryError> {
+    let mut x = start;
+    for _ in 0..32 {
+        let jet = match surface.derivatives([x[0], x[1]]) {
+            Ok(jet) => jet,
+            Err(GeometryError::SingularParameterization) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let r = sub(jet.point, add(o, scale(d, x[2])));
+        if norm(r) <= tolerance {
+            return Ok(Some(x));
+        }
+        // [du dv -d] dx = -r, by Cramer's rule.
+        let m = [jet.du, jet.dv, scale(d, -1.0)];
+        let det = dot(m[0], cross(m[1], m[2]));
+        if det.abs() <= f64::EPSILON * norm(m[0]) * norm(m[1]) {
+            return Ok(None);
+        }
+        let rhs = scale(r, -1.0);
+        let step = [
+            dot(rhs, cross(m[1], m[2])) / det,
+            dot(m[0], cross(rhs, m[2])) / det,
+            dot(m[0], cross(m[1], rhs)) / det,
+        ];
+        for i in 0..3 {
+            x[i] += step[i];
+        }
+        if x.iter().any(|v| !v.is_finite()) {
+            return Ok(None);
+        }
+    }
+    Ok(None)
 }
 
 fn ray_box_domain(
@@ -394,14 +508,25 @@ fn classify_with_ray<'a>(
     let mut hits: Vec<(f64, Point3)> = Vec::new();
     for face in faces {
         let surface = brep.geometry.surface(face.surface)?;
-        let Some(roots) = support_roots(
-            surface,
-            point,
-            direction,
-            domain,
-            brep.accuracy.intersection,
-        )?
-        else {
+        let roots = if matches!(surface, SurfaceGeometry::Wrapped { .. }) {
+            wrapped_ray_roots(
+                surface,
+                face.trim.uv_bounds,
+                point,
+                direction,
+                domain,
+                brep.accuracy.intersection,
+            )?
+        } else {
+            support_roots(
+                surface,
+                point,
+                direction,
+                domain,
+                brep.accuracy.intersection,
+            )?
+        };
+        let Some(roots) = roots else {
             return Ok(PointClassification::Unknown);
         };
         for parameter in roots {

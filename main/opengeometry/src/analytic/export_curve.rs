@@ -205,6 +205,225 @@ pub fn fit_intersection_curve(
     })
 }
 
+/// A cubic B-spline (Bezier spans, C1 joints) fitted to an elementary curve.
+/// Knots are the curve's own parameter values.
+#[derive(Clone, Debug)]
+pub struct FittedCurve {
+    pub controls: Vec<Point3>,
+    pub knots: Vec<f64>,
+    pub multiplicities: Vec<usize>,
+    pub error_bound: f64,
+}
+
+/// A bicubic B-spline (Bezier patches, C1 joints) fitted to a surface over a
+/// UV box. Knots are the surface's own parameter values, so its pcurves stay
+/// valid. `controls[i][j]`: i along u, j along v.
+#[derive(Clone, Debug)]
+pub struct FittedSurface {
+    pub controls: Vec<Vec<Point3>>,
+    pub knots: [Vec<f64>; 2],
+    pub multiplicities: [Vec<usize>; 2],
+    pub error_bound: f64,
+}
+
+fn bernstein(t: f64) -> [f64; 4] {
+    let s = 1.0 - t;
+    [s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t]
+}
+
+fn knot_vector(values: &[f64]) -> (Vec<f64>, Vec<usize>) {
+    let last = values.len() - 1;
+    let multiplicities = (0..=last)
+        .map(|i| if i == 0 || i == last { 4 } else { 3 })
+        .collect();
+    (values.to_vec(), multiplicities)
+}
+
+/// Samples per span (and per patch side) at which a fit is checked against
+/// the exact geometry.
+const FIT_SAMPLES: usize = 16;
+
+/// Fits `curve` over `range` with cubic Hermite spans (end points and
+/// tangents exact), splitting spans until each is within `tolerance` at
+/// FIT_SAMPLES points measured against the exact curve.
+pub fn fit_curve(
+    curve: &super::CurveGeometry,
+    range: Interval,
+    tolerance: f64,
+    max_segments: usize,
+) -> Result<FittedCurve, GeometryError> {
+    if !tolerance.is_finite() || tolerance <= 0.0 || max_segments == 0 {
+        return Err(GeometryError::InvalidGeometry(
+            "export curve fitting requires positive tolerance and segment budget".into(),
+        ));
+    }
+    let span = |a: f64, b: f64| -> Result<([Point3; 4], f64), GeometryError> {
+        let h = b - a;
+        let (p0, p3) = (curve.elementary_point(a)?, curve.elementary_point(b)?);
+        let (t0, t1) = (curve.elementary_tangent(a)?, curve.elementary_tangent(b)?);
+        let c = [
+            p0,
+            std::array::from_fn(|i| p0[i] + t0[i] * h / 3.0),
+            std::array::from_fn(|i| p3[i] - t1[i] * h / 3.0),
+            p3,
+        ];
+        let mut error: f64 = 0.0;
+        for k in 1..FIT_SAMPLES {
+            let s = k as f64 / FIT_SAMPLES as f64;
+            let w = bernstein(s);
+            let fitted: Point3 = std::array::from_fn(|i| (0..4).map(|j| w[j] * c[j][i]).sum());
+            error = error.max(norm(sub(fitted, curve.elementary_point(a + s * h)?)));
+        }
+        Ok((c, error))
+    };
+    let mut stack = vec![(range.lo, range.hi, 0usize)];
+    let mut accepted = Vec::new();
+    while let Some((a, b, depth)) = stack.pop() {
+        let (c, error) = span(a, b)?;
+        if error <= tolerance {
+            accepted.push((a, c, error));
+            continue;
+        }
+        if depth >= 40 || accepted.len() + stack.len() + 2 > max_segments {
+            return Err(GeometryError::LimitExceeded(
+                "export curve fit segments".into(),
+            ));
+        }
+        let m = 0.5 * (a + b);
+        stack.push((m, b, depth + 1));
+        stack.push((a, m, depth + 1));
+    }
+    accepted.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut controls = Vec::with_capacity(accepted.len() * 3 + 1);
+    let mut error_bound: f64 = 0.0;
+    for (index, (_, c, error)) in accepted.iter().enumerate() {
+        controls.extend_from_slice(&c[usize::from(index > 0)..]);
+        error_bound = error_bound.max(*error);
+    }
+    let mut values: Vec<f64> = accepted.iter().map(|x| x.0).collect();
+    values.push(range.hi);
+    let (knots, multiplicities) = knot_vector(&values);
+    Ok(FittedCurve {
+        controls,
+        knots,
+        multiplicities,
+        error_bound,
+    })
+}
+
+/// Fits `surface` over `domain` with bicubic Hermite patches on a uniform
+/// grid (corner points, both partials and the twist exact), refining the
+/// grid until every patch is within `tolerance` at (FIT_SAMPLES + 1)^2
+/// points measured against the exact surface.
+pub fn fit_surface(
+    surface: &super::SurfaceGeometry,
+    domain: [Interval; 2],
+    tolerance: f64,
+    max_patches: usize,
+) -> Result<FittedSurface, GeometryError> {
+    if !tolerance.is_finite() || tolerance <= 0.0 || max_patches == 0 {
+        return Err(GeometryError::InvalidGeometry(
+            "export surface fitting requires positive tolerance and patch budget".into(),
+        ));
+    }
+    let mut n = [1usize, 1usize];
+    loop {
+        let values: [Vec<f64>; 2] = std::array::from_fn(|axis| {
+            (0..=n[axis])
+                .map(|i| domain[axis].lo + domain[axis].width() * i as f64 / n[axis] as f64)
+                .collect()
+        });
+        let h = [
+            domain[0].width() / n[0] as f64,
+            domain[1].width() / n[1] as f64,
+        ];
+        let mut jets = Vec::with_capacity(n[0] + 1);
+        for &u in &values[0] {
+            let mut row = Vec::with_capacity(n[1] + 1);
+            for &v in &values[1] {
+                row.push(surface.derivatives([u, v])?);
+            }
+            jets.push(row);
+        }
+        // Control (I, J): from the patch corner it belongs to, stepped inward.
+        let side = |index: usize| -> (usize, f64) {
+            match index % 3 {
+                0 => (index / 3, 0.0),
+                1 => (index / 3, 1.0),
+                _ => (index / 3 + 1, -1.0),
+            }
+        };
+        let controls: Vec<Vec<Point3>> = (0..=3 * n[0])
+            .map(|i| {
+                (0..=3 * n[1])
+                    .map(|j| {
+                        let ((ci, su), (cj, sv)) = (side(i), side(j));
+                        let jet = &jets[ci][cj];
+                        let (a, b) = (su * h[0] / 3.0, sv * h[1] / 3.0);
+                        std::array::from_fn(|k| {
+                            jet.point[k] + a * jet.du[k] + b * jet.dv[k] + a * b * jet.duv[k]
+                        })
+                    })
+                    .collect()
+            })
+            .collect();
+        // Error on the patch edges (one direction at a time) and inside.
+        let (mut along_u, mut along_v, mut error): (f64, f64, f64) = (0.0, 0.0, 0.0);
+        for pi in 0..n[0] {
+            for pj in 0..n[1] {
+                for a in 0..=FIT_SAMPLES {
+                    for b in 0..=FIT_SAMPLES {
+                        let (s, t) = (a as f64 / FIT_SAMPLES as f64, b as f64 / FIT_SAMPLES as f64);
+                        let (wu, wv) = (bernstein(s), bernstein(t));
+                        let fitted: Point3 = std::array::from_fn(|k| {
+                            (0..4)
+                                .map(|x| {
+                                    (0..4)
+                                        .map(|y| {
+                                            wu[x] * wv[y] * controls[3 * pi + x][3 * pj + y][k]
+                                        })
+                                        .sum::<f64>()
+                                })
+                                .sum()
+                        });
+                        let exact = surface
+                            .point_at([values[0][pi] + s * h[0], values[1][pj] + t * h[1]])?;
+                        let e = norm(sub(fitted, exact));
+                        error = error.max(e);
+                        if b == 0 || b == FIT_SAMPLES {
+                            along_u = along_u.max(e);
+                        }
+                        if a == 0 || a == FIT_SAMPLES {
+                            along_v = along_v.max(e);
+                        }
+                    }
+                }
+            }
+        }
+        if error <= tolerance {
+            let [ku, kv] = values.map(|v| knot_vector(&v));
+            return Ok(FittedSurface {
+                controls,
+                knots: [ku.0, kv.0],
+                multiplicities: [ku.1, kv.1],
+                error_bound: error,
+            });
+        }
+        let (refine_u, refine_v) = (along_u > tolerance / 4.0, along_v > tolerance / 4.0);
+        if refine_u || !refine_v {
+            n[0] *= 2;
+        }
+        if refine_v || !refine_u {
+            n[1] *= 2;
+        }
+        if n[0].saturating_mul(n[1]) > max_patches {
+            return Err(GeometryError::LimitExceeded(
+                "export surface fit patches".into(),
+            ));
+        }
+    }
+}
+
 impl FittedIntersectionCurve {
     pub fn pcurve(&self, side: IntersectionSide) -> &[[f64; 2]] {
         if side == IntersectionSide::A {

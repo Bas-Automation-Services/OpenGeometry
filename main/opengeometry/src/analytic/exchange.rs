@@ -1,5 +1,5 @@
 use super::{
-    export_curve::{fit_intersection_curve, FittedIntersectionCurve},
+    export_curve::{fit_curve, fit_intersection_curve, fit_surface, FittedIntersectionCurve},
     geometry::{cross, dot, norm, sub, unit},
     topology::{EdgeGeometry, GeometryQuality, Orientation, PcurveGeometry},
     BrepEnvelope, CurveGeometry, Frame3, GeometryError, SurfaceGeometry,
@@ -153,12 +153,52 @@ fn curve(
                 real(minor_radius * scale)
             ))
         }
-        CurveGeometry::Intersection { .. } => {
+        CurveGeometry::Intersection { .. } | CurveGeometry::Wrapped { .. } => {
             return Err(GeometryError::UnsupportedGeometry(
                 "STEP numerical branches require bounded export-curve fitting".into(),
             ))
         }
     })
+}
+
+fn bspline_surface(
+    writer: &mut Part21Writer,
+    fitted: &super::export_curve::FittedSurface,
+    scale: f64,
+) -> usize {
+    let rows = fitted
+        .controls
+        .iter()
+        .map(|row| {
+            let ids: Vec<_> = row
+                .iter()
+                .map(|p| point(writer, &p.map(|v| v * scale)))
+                .collect();
+            format!("({})", refs(&ids))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let list = |values: &[usize]| {
+        values
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let reals = |values: &[f64]| {
+        values
+            .iter()
+            .map(|v| real(*v))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    writer.add_entity(format!(
+        "B_SPLINE_SURFACE_WITH_KNOTS('',3,3,({rows}),.UNSPECIFIED.,.F.,.F.,.F.,({}),({}),({}),({}),.UNSPECIFIED.)",
+        list(&fitted.multiplicities[0]),
+        list(&fitted.multiplicities[1]),
+        reals(&fitted.knots[0]),
+        reals(&fitted.knots[1]),
+    ))
 }
 
 fn pcurve(
@@ -311,6 +351,10 @@ pub(super) fn preflight(brep: &BrepEnvelope, scale: f64) -> Result<f64, Geometry
                 CurveGeometry::Circle { frame, .. } | CurveGeometry::Ellipse { frame, .. } => {
                     &frame.origin
                 }
+                CurveGeometry::Wrapped { wrap, .. } => {
+                    frame_bound = frame_bound.max(frame_error(&wrap.frame, bounds)?);
+                    &wrap.frame.origin
+                }
                 CurveGeometry::Intersection { .. } => continue,
             };
             magnitude = origin.iter().fold(magnitude, |m, v| m.max(v.abs()));
@@ -385,11 +429,30 @@ pub fn export_step_in(
     let context2 =
         writer.add_entity("(GEOMETRIC_REPRESENTATION_CONTEXT(2) REPRESENTATION_CONTEXT('',''))");
     let mut surfaces = vec![None; brep.geometry.surfaces.len()];
+    let mut fitting_error: f64 = 0.0;
     for face in &brep.topology.faces {
         if surfaces[face.surface as usize].is_some() {
             continue;
         }
         let surface = brep.geometry.surface(face.surface)?;
+        if let SurfaceGeometry::Wrapped { .. } = surface {
+            // A cubic B-spline over the UV of every face on this support.
+            let mut domain = face.trim.uv_bounds;
+            for other in &brep.topology.faces {
+                if other.surface == face.surface {
+                    domain = [0, 1].map(|i| domain[i].hull(other.trim.uv_bounds[i]));
+                }
+            }
+            if fitting_budget <= 0.0 {
+                return Err(GeometryError::LimitExceeded(
+                    "STEP exchange budget leaves no room for wrapped surface fitting".into(),
+                ));
+            }
+            let fitted = fit_surface(surface, domain, fitting_budget, 1 << 16)?;
+            fitting_error = fitting_error.max(fitted.error_bound);
+            surfaces[face.surface as usize] = Some(bspline_surface(&mut writer, &fitted, scale));
+            continue;
+        }
         let frame = placement(&mut writer, surface.frame(), scale);
         let expression = match surface {
             SurfaceGeometry::Plane { .. } => format!("PLANE('',#{frame})"),
@@ -411,6 +474,7 @@ pub fn export_step_in(
                 real(major_radius * scale),
                 real(minor_radius * scale)
             ),
+            SurfaceGeometry::Wrapped { .. } => unreachable!("fitted above"),
         };
         surfaces[face.surface as usize] = Some(writer.add_entity(expression));
     }
@@ -426,7 +490,15 @@ pub fn export_step_in(
     let mut edges = vec![None; brep.topology.edges.len()];
     let mut curves = vec![None; brep.geometry.curves.len()];
     let mut fitted_curves = vec![None; brep.geometry.curves.len()];
-    let mut fitting_error: f64 = 0.0;
+    // A wrapped curve is fitted once, over every range an edge uses it in.
+    let mut curve_ranges: Vec<Option<crate::math::interval::Interval>> =
+        vec![None; brep.geometry.curves.len()];
+    for edge in &brep.topology.edges {
+        if let EdgeGeometry::Curve { curve, range } = edge.geometry {
+            let slot = &mut curve_ranges[curve as usize];
+            *slot = Some(slot.map_or(range, |r| r.hull(range)));
+        }
+    }
     for edge in &brep.topology.edges {
         let EdgeGeometry::Curve {
             curve: curve_id,
@@ -476,6 +548,32 @@ pub fn export_step_in(
                         )?;
                         fitted_curves[curve_id as usize] = Some(fitted);
                         id
+                    }
+                    CurveGeometry::Wrapped { .. } => {
+                        if fitting_budget <= 0.0 {
+                            return Err(GeometryError::LimitExceeded(
+                                "STEP exchange budget leaves no room for wrapped curve fitting"
+                                    .into(),
+                            ));
+                        }
+                        let fitted = fit_curve(
+                            geometry,
+                            curve_ranges[curve_id as usize].unwrap_or(range),
+                            fitting_budget,
+                            20_000,
+                        )?;
+                        fitting_error = fitting_error.max(fitted.error_bound);
+                        let controls = fitted
+                            .controls
+                            .iter()
+                            .map(|control| control.map(|value| value * scale).to_vec())
+                            .collect::<Vec<_>>();
+                        bspline_curve(
+                            &mut writer,
+                            &controls,
+                            &fitted.knots,
+                            &fitted.multiplicities,
+                        )?
                     }
                     _ => curve(&mut writer, geometry, scale)?,
                 };

@@ -8324,6 +8324,11 @@ pub fn shell_brep(
             }
             Err(error) => return Err(error),
         },
+        Some(SurfaceGeometry::Wrapped { .. }) => {
+            return Err(GeometryError::UnsupportedGeometry(
+                "wrapped surfaces are not supported here".into(),
+            ))
+        }
         Some(SurfaceGeometry::Cone { .. }) => {
             let input = full_conic_section(input)?;
             let slope = input.semi_angle.tan();
@@ -9137,6 +9142,7 @@ pub fn boolean_spheres(
             Some(SurfaceGeometry::Cone { .. }) => "cone",
             Some(SurfaceGeometry::Torus { .. }) => "torus",
             Some(SurfaceGeometry::Plane { .. }) => "planar/compound solid",
+            Some(SurfaceGeometry::Wrapped { .. }) => "wrapped",
             None => "empty solid",
         }
         .to_string()

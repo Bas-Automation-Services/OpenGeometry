@@ -810,6 +810,9 @@ fn finite_target_domain(
             Interval::new(0.0, maximum_radius + margin)?,
         ]),
         SurfaceGeometry::Sphere { .. } | SurfaceGeometry::Torus { .. } => unreachable!(),
+        SurfaceGeometry::Wrapped { .. } => Err(GeometryError::UnsupportedGeometry(
+            "wrapped surfaces are not supported here".into(),
+        )),
     }
 }
 
@@ -865,8 +868,20 @@ pub fn intersect_surfaces(
     let sb = store.surface(b)?.clone();
     sa.validate()?;
     sb.validate()?;
+    if matches!(sa, SurfaceGeometry::Wrapped { .. })
+        || matches!(sb, SurfaceGeometry::Wrapped { .. })
+    {
+        return Err(GeometryError::UnsupportedGeometry(
+            "wrapped surfaces are not supported here".into(),
+        ));
+    }
     let fast_intersection = (|| -> Result<GeometryResult, GeometryError> {
         Ok(match (&sa, &sb) {
+            (SurfaceGeometry::Wrapped { .. }, _) | (_, SurfaceGeometry::Wrapped { .. }) => {
+                return Err(GeometryError::UnsupportedGeometry(
+                    "wrapped surfaces are not supported here".into(),
+                ))
+            }
             (SurfaceGeometry::Plane { frame: a }, SurfaceGeometry::Plane { frame: b }) => {
                 plane_plane(*a, *b, accuracy)?
             }
