@@ -448,6 +448,18 @@ pub fn export_step_in(
                     "STEP exchange budget leaves no room for wrapped surface fitting".into(),
                 ));
             }
+            // Past the faces: a reader that rebuilds trims by intersecting
+            // surfaces (Inventor does) needs each support to reach beyond the
+            // edges, or it trims short. 10% each way, but never around a
+            // periodic direction onto itself (a hole wall spans a full turn).
+            let periods = super::geometry::Surface::charts(surface)[0].periods;
+            let [u, v] = [0, 1].map(|i| {
+                let d = domain[i];
+                let room = periods[i].map_or(f64::INFINITY, |p| (p - d.width()) / 2.0);
+                let pad = (0.1 * d.width()).min(0.9 * room.max(0.0));
+                crate::math::interval::Interval::new(d.lo - pad, d.hi + pad)
+            });
+            let domain = [u?, v?];
             let fitted = fit_surface(surface, domain, fitting_budget, 1 << 16)?;
             fitting_error = fitting_error.max(fitted.error_bound);
             surfaces[face.surface as usize] = Some(bspline_surface(&mut writer, &fitted, scale));
