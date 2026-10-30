@@ -143,6 +143,11 @@ impl Entities {
                     "IFC numerical intersection edges require bounded export-only fitting".into(),
                 ))
             }
+            CurveGeometry::Wrapped { .. } => {
+                return Err(GeometryError::UnsupportedGeometry(
+                    "IFC export of wrapped curves".into(),
+                ))
+            }
         })
     }
 
@@ -313,6 +318,11 @@ pub fn prepare_ifc_body(input: &BrepEnvelope) -> Result<AnalyticExchangeBodyV2, 
                     },
                 ],
             ),
+            SurfaceGeometry::Wrapped { .. } => {
+                return Err(GeometryError::UnsupportedGeometry(
+                    "IFC export of wrapped surfaces".into(),
+                ))
+            }
             SurfaceGeometry::Cone { frame, semi_angle } => {
                 let height = brep
                     .topology

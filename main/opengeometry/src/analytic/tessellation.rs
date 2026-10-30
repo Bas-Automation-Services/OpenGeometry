@@ -192,6 +192,50 @@ fn count(value: f64, minimum: usize, max_triangles: usize) -> Result<usize, Geom
     }
     Ok(value as usize)
 }
+/// Wrapped surfaces have no closed-form curvature bound that isn't far too
+/// loose (they are straight along their rulings), so their second derivatives
+/// are sampled on a 9 x 9 grid of the box and given a 1.5x margin. The maps
+/// are trigonometric in the parameters, so that grid sees their extremes
+/// well within the margin.
+const WRAPPED_MARGIN: f64 = 1.5;
+
+fn wrapped_second_derivatives(
+    surface: &SurfaceGeometry,
+    bounds: [Interval; 2],
+) -> Result<[f64; 2], GeometryError> {
+    let mut maximum = [0.0_f64; 2];
+    for i in 0..=8 {
+        for j in 0..=8 {
+            let uv = [
+                bounds[0].lo + bounds[0].width() * i as f64 / 8.0,
+                bounds[1].lo + bounds[1].width() * j as f64 / 8.0,
+            ];
+            let jet = surface.derivatives(uv)?;
+            maximum[0] = maximum[0].max(norm(jet.duu));
+            maximum[1] = maximum[1].max(norm(jet.dvv));
+        }
+    }
+    Ok(maximum.map(|m| m * WRAPPED_MARGIN))
+}
+
+/// Chord deviation bound of the surface curve between two UV points of a
+/// wrapped surface: sampled along the segment, with the same margin.
+fn wrapped_chord_deviation(surface: &SurfaceGeometry, a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (du, dv) = (b[0] - a[0], b[1] - a[1]);
+    let mut maximum = 0.0_f64;
+    for k in 0..=2 {
+        let t = k as f64 / 2.0;
+        let Ok(jet) = surface.derivatives([a[0] + t * du, a[1] + t * dv]) else {
+            return f64::INFINITY;
+        };
+        let acceleration: Point3 = std::array::from_fn(|i| {
+            jet.duu[i] * du * du + 2.0 * jet.duv[i] * du * dv + jet.dvv[i] * dv * dv
+        });
+        maximum = maximum.max(norm(acceleration));
+    }
+    maximum * WRAPPED_MARGIN / 8.0
+}
+
 fn grid_size(
     surface: &SurfaceGeometry,
     bounds: [Interval; 2],
@@ -225,6 +269,13 @@ fn grid_size(
             count(u * ((r + 2.0 * a) / error).sqrt(), 3, max_triangles)?,
             count(v * (2.0 * a / error).sqrt(), 3, max_triangles)?,
         ),
+        SurfaceGeometry::Wrapped { .. } => {
+            let [uu, vv] = wrapped_second_derivatives(surface, bounds)?;
+            (
+                count(u * (uu / (8.0 * error)).sqrt(), 3, max_triangles)?,
+                count(v * (vv / (8.0 * error)).sqrt(), 1, max_triangles)?,
+            )
+        }
         SurfaceGeometry::Plane { .. } => {
             return Err(GeometryError::InvalidGeometry(
                 "plane does not use a curved grid".into(),
@@ -502,6 +553,15 @@ fn edge_count(
             ),
             CurveGeometry::Intersection { definition } => {
                 bounded_intersection_count(brep, *definition, curve, range, error, max_triangles)
+            }
+            geometry @ CurveGeometry::Wrapped { curve: flat, .. } => {
+                let closed = !matches!(**flat, CurveGeometry::Line { .. })
+                    && range.width() >= std::f64::consts::TAU - 1e-12;
+                count(
+                    range.width() * (geometry.derivative_bounds(range)?.1 / (8.0 * error)).sqrt(),
+                    if closed { 3 } else { 1 },
+                    max_triangles,
+                )
             }
         },
     }
@@ -962,6 +1022,7 @@ fn trimmed_surface_edge_deviation(
         }
     };
     let acceleration = match surface {
+        SurfaceGeometry::Wrapped { .. } => return wrapped_chord_deviation(surface, uv[a], uv[b]),
         SurfaceGeometry::Plane { .. } => 0.0,
         SurfaceGeometry::Sphere { radius, .. } => {
             let cos_v = maximum_trig(0.0, f64::cos);

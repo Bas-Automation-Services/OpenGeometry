@@ -157,6 +157,11 @@ fn implicit_interval(
                 .add(z2)?
                 .sub(Interval::point(minor_radius * minor_radius)?)?
         }
+        SurfaceGeometry::Wrapped { .. } => {
+            return Err(GeometryError::UnsupportedGeometry(
+                "wrapped surfaces are not supported here".into(),
+            ))
+        }
     })
 }
 
@@ -182,6 +187,11 @@ fn implicit_value(surface: &SurfaceGeometry, point: Point3) -> Result<f64, Geome
             let radial = x.mul_add(x, y * y);
             (radial.sqrt() - major_radius).powi(2) + z * z - minor_radius * minor_radius
         }
+        SurfaceGeometry::Wrapped { .. } => {
+            return Err(GeometryError::UnsupportedGeometry(
+                "wrapped surfaces are not supported here".into(),
+            ))
+        }
     };
     if value.is_finite() {
         Ok(value)
@@ -204,6 +214,7 @@ fn surface_scale(surface: &SurfaceGeometry) -> f64 {
             minor_radius,
             ..
         } => major_radius + minor_radius,
+        SurfaceGeometry::Wrapped { wrap, .. } => wrap.radius,
     }
 }
 

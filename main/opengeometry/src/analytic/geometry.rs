@@ -118,6 +118,110 @@ impl Frame3 {
     }
 }
 
+/// Wraps flat space around a cylinder axis, the way a sheet metal bend wraps
+/// its flat strip. A flat point `(x, y, z)` goes to
+/// `frame.point([z cos(x / radius), z sin(x / radius), y])`: `x` is arc length
+/// on the cylinder of `radius` around `frame.z`, `y` runs along the axis and
+/// `z` is the distance from the axis. Lines along flat z map to radial lines.
+///
+/// The map preserves orientation (its Jacobian determinant is `z / radius`)
+/// and is exact, so curves and surfaces wrapped with it stay exact. The
+/// inverse takes the angle in (-pi, pi] around `frame.x` unless a hint says
+/// otherwise; put `frame.x` in the middle of the region you wrap.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wrap {
+    pub frame: Frame3,
+    pub radius: f64,
+}
+
+impl Wrap {
+    pub fn validate(&self) -> Result<(), GeometryError> {
+        self.frame.validate()?;
+        if !self.radius.is_finite() || self.radius <= 0.0 {
+            return Err(GeometryError::InvalidGeometry(
+                "wrap radius must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Unit vectors at flat point p (local to the frame): along increasing
+    /// angle, along the axis, away from the axis.
+    fn axes(&self, p: Point3) -> [Point3; 3] {
+        let (s, c) = (p[0] / self.radius).sin_cos();
+        [[-s, c, 0.0], [0.0, 0.0, 1.0], [c, s, 0.0]]
+    }
+
+    pub fn point(&self, p: Point3) -> Point3 {
+        let (s, c) = (p[0] / self.radius).sin_cos();
+        self.frame.point([p[2] * c, p[2] * s, p[1]])
+    }
+
+    /// The Jacobian applied to a flat vector v at flat point p.
+    pub fn push(&self, p: Point3, v: Point3) -> Point3 {
+        let [t, a, r] = self.axes(p);
+        let local = add(
+            add(scale(t, v[0] * p[2] / self.radius), scale(a, v[1])),
+            scale(r, v[2]),
+        );
+        self.frame.vector(local)
+    }
+
+    /// The second derivative D2W(p)[a, b].
+    pub fn second(&self, p: Point3, a: Point3, b: Point3) -> Point3 {
+        let [t, _, r] = self.axes(p);
+        let xx = scale(r, -p[2] / (self.radius * self.radius));
+        let xz = scale(t, 1.0 / self.radius);
+        self.frame.vector(add(
+            scale(xx, a[0] * b[0]),
+            scale(xz, a[0] * b[2] + a[2] * b[0]),
+        ))
+    }
+
+    /// A normal at flat point p of the image of a surface with flat normal n
+    /// (the cofactor of the Jacobian applied to n; not unit length).
+    pub fn push_normal(&self, p: Point3, n: Point3) -> Point3 {
+        let [t, a, r] = self.axes(p);
+        let k = p[2] / self.radius;
+        self.frame.vector(add(
+            add(scale(t, n[0]), scale(a, k * n[1])),
+            scale(r, k * n[2]),
+        ))
+    }
+
+    /// The flat point of world point q. `hint_x` picks the turn the angle is
+    /// taken in.
+    pub fn unwrap(&self, q: Point3, hint_x: Option<f64>) -> Result<Point3, GeometryError> {
+        let l = self.frame.local(q);
+        let z = l[0].hypot(l[1]);
+        if z == 0.0 {
+            return Err(GeometryError::SingularParameterization);
+        }
+        let angle = lift(l[1].atan2(l[0]), hint_x.map(|x| x / self.radius));
+        checked([angle * self.radius, l[2], z])
+    }
+
+    /// Conservative world box of a flat box.
+    pub fn enclose(&self, flat: PatchBounds) -> Result<PatchBounds, GeometryError> {
+        let [x, y, z] = flat.axes;
+        let angle = x.mul(Interval::point(1.0 / self.radius)?)?;
+        let (c, s) = (angle.cos()?, angle.sin()?);
+        self.frame.bounds([c.mul(z)?, s.mul(z)?, y])
+    }
+
+    /// Bounds on the map's derivatives where the distance from the axis is at
+    /// most `z_max`: the Jacobian's norm and the second derivative's norm
+    /// on unit vectors.
+    pub fn derivative_bounds(&self, z_max: f64) -> (f64, f64) {
+        let z = z_max.abs();
+        (
+            (z / self.radius).max(1.0),
+            z / (self.radius * self.radius) + 1.0 / self.radius,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct PatchBounds {
     pub axes: [Interval; 3],
@@ -189,6 +293,12 @@ pub enum SurfaceGeometry {
         major_radius: f64,
         minor_radius: f64,
     },
+    /// `surface`, given in the wrap's flat space, wrapped around the axis.
+    /// Same parameters and charts as `surface`.
+    Wrapped {
+        wrap: Wrap,
+        surface: Box<SurfaceGeometry>,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -211,6 +321,7 @@ pub trait Surface {
 }
 
 impl SurfaceGeometry {
+    /// The placement frame; for a wrapped surface, the wrap's frame.
     pub fn frame(&self) -> &Frame3 {
         match self {
             Self::Plane { frame }
@@ -218,9 +329,19 @@ impl SurfaceGeometry {
             | Self::Cylinder { frame, .. }
             | Self::Cone { frame, .. }
             | Self::Torus { frame, .. } => frame,
+            Self::Wrapped { wrap, .. } => &wrap.frame,
         }
     }
     pub fn validate(&self) -> Result<(), GeometryError> {
+        if let Self::Wrapped { wrap, surface } = self {
+            wrap.validate()?;
+            if matches!(**surface, Self::Wrapped { .. }) {
+                return Err(GeometryError::InvalidGeometry(
+                    "a wrapped surface cannot wrap another wrapped surface".into(),
+                ));
+            }
+            return surface.validate();
+        }
         self.frame().validate()?;
         let valid = match self {
             Self::Plane { .. } => true,
@@ -242,6 +363,7 @@ impl SurfaceGeometry {
                     && *minor_radius > 0.0
                     && major_radius > minor_radius
             }
+            Self::Wrapped { .. } => true,
         };
         if !valid {
             return Err(GeometryError::InvalidGeometry(
@@ -252,6 +374,10 @@ impl SurfaceGeometry {
     }
 
     fn check_uv(&self, uv: UV) -> Result<(), GeometryError> {
+        if let Self::Wrapped { wrap, surface } = self {
+            wrap.validate()?;
+            return surface.check_uv(uv);
+        }
         self.validate()?;
         for x in uv {
             finite(x)?;
@@ -267,6 +393,9 @@ impl SurfaceGeometry {
     }
 
     pub(crate) fn parameter_in_domain(&self, uv: UV) -> bool {
+        if let Self::Wrapped { surface, .. } = self {
+            return surface.parameter_in_domain(uv);
+        }
         uv.into_iter().all(f64::is_finite)
             && (!matches!(self, Self::Sphere { .. }) || uv[1].abs() <= std::f64::consts::FRAC_PI_2)
             && (!matches!(self, Self::Cone { .. }) || uv[1] >= 0.0)
@@ -286,6 +415,20 @@ impl Surface for SurfaceGeometry {
 
     fn derivatives(&self, uv: UV) -> Result<SurfaceJet2, GeometryError> {
         self.check_uv(uv)?;
+        if let Self::Wrapped { wrap, surface } = self {
+            // Chain rule through the wrap.
+            let f = surface.derivatives(uv)?;
+            let p = f.point;
+            let second = |a, b, d| add(wrap.second(p, a, b), wrap.push(p, d));
+            return Ok(SurfaceJet2 {
+                point: checked(wrap.point(p))?,
+                du: checked(wrap.push(p, f.du))?,
+                dv: checked(wrap.push(p, f.dv))?,
+                duu: checked(second(f.du, f.du, f.duu))?,
+                duv: checked(second(f.du, f.dv, f.duv))?,
+                dvv: checked(second(f.dv, f.dv, f.dvv))?,
+            });
+        }
         let (su, cu) = uv[0].sin_cos();
         let (sv, cv) = uv[1].sin_cos();
         let radial = [cu, su, 0.0];
@@ -347,6 +490,7 @@ impl Surface for SurfaceGeometry {
                     add(scale(radial, -a * cv), scale(z, -a * sv)),
                 )
             }
+            Self::Wrapped { .. } => unreachable!("handled above"),
         };
         let f = self.frame();
         Ok(SurfaceJet2 {
@@ -361,6 +505,13 @@ impl Surface for SurfaceGeometry {
 
     fn normal_at(&self, uv: UV) -> Result<Point3, GeometryError> {
         self.check_uv(uv)?;
+        if let Self::Wrapped { wrap, surface } = self {
+            let p = surface.point_at(uv)?;
+            if p[2] <= 0.0 {
+                return Err(GeometryError::SingularParameterization);
+            }
+            return unit(wrap.push_normal(p, surface.normal_at(uv)?));
+        }
         let (s, c) = uv[0].sin_cos();
         let (sv, cv) = uv[1].sin_cos();
         let n = match self {
@@ -377,6 +528,7 @@ impl Surface for SurfaceGeometry {
                     -semi_angle.sin(),
                 ]
             }
+            Self::Wrapped { .. } => unreachable!("handled above"),
         };
         checked(self.frame().vector(n))
     }
@@ -388,6 +540,15 @@ impl Surface for SurfaceGeometry {
             for v in h {
                 finite(v)?;
             }
+        }
+        if let Self::Wrapped { wrap, surface } = self {
+            // Exact for points on the surface; a point off it lands on the
+            // flat surface's projection of its unwrapped image.
+            let hint_x = match hint {
+                Some(h) => Some(surface.point_at(h)?[0]),
+                None => None,
+            };
+            return surface.project(wrap.unwrap(p, hint_x)?, hint);
         }
         let p = checked(self.frame().local(p))?;
         let radial = p[0].hypot(p[1]);
@@ -422,6 +583,7 @@ impl Surface for SurfaceGeometry {
                     lift(p[2].atan2(radial - major_radius), hint.map(|h| h[1])),
                 ]
             }
+            Self::Wrapped { .. } => unreachable!("handled above"),
         };
         for x in result {
             finite(x)?;
@@ -436,10 +598,15 @@ impl Surface for SurfaceGeometry {
             Self::Cylinder { .. } => &CYLINDER_CHART,
             Self::Cone { .. } => &CONE_CHART,
             Self::Torus { .. } => &TORUS_CHART,
+            Self::Wrapped { surface, .. } => surface.charts(),
         }
     }
 
     fn enclose(&self, domain: UVBox) -> Result<PatchBounds, GeometryError> {
+        if let Self::Wrapped { wrap, surface } = self {
+            wrap.validate()?;
+            return wrap.enclose(surface.enclose(domain)?);
+        }
         for d in domain {
             Interval::new(d.lo, d.hi)?;
         }
@@ -475,6 +642,7 @@ impl Surface for SurfaceGeometry {
                 let r = Interval::point(*major_radius)?.add(v.cos()?.mul(a)?)?;
                 [c.mul(r)?, s.mul(r)?, v.sin()?.mul(a)?]
             }
+            Self::Wrapped { .. } => unreachable!("handled above"),
         };
         self.frame().bounds(local)
     }
@@ -498,6 +666,12 @@ pub enum CurveGeometry {
     },
     Intersection {
         definition: u32,
+    },
+    /// `curve`, given in the wrap's flat space, wrapped around the axis.
+    /// Same parameter as `curve`.
+    Wrapped {
+        wrap: Wrap,
+        curve: Box<CurveGeometry>,
     },
 }
 
@@ -540,8 +714,38 @@ impl CurveGeometry {
                 }
             }
             Self::Intersection { .. } => {}
+            Self::Wrapped { wrap, curve } => {
+                wrap.validate()?;
+                if matches!(**curve, Self::Wrapped { .. } | Self::Intersection { .. }) {
+                    return Err(GeometryError::InvalidGeometry(
+                        "a wrapped curve must wrap a line, circle or ellipse".into(),
+                    ));
+                }
+                curve.validate()?;
+            }
         };
         Ok(())
+    }
+
+    /// Bounds on the speed |C'| and acceleration |C''| over `range`.
+    pub(crate) fn derivative_bounds(&self, range: Interval) -> Result<(f64, f64), GeometryError> {
+        Ok(match self {
+            Self::Line { .. } => (1.0, 0.0),
+            Self::Circle { radius, .. } => (*radius, *radius),
+            Self::Ellipse { major_radius, .. } => (*major_radius, *major_radius),
+            Self::Intersection { definition } => {
+                return Err(GeometryError::MissingReference {
+                    kind: "intersection".into(),
+                    index: *definition,
+                })
+            }
+            Self::Wrapped { wrap, curve } => {
+                let (speed, acceleration) = curve.derivative_bounds(range)?;
+                let z = curve.elementary_bounds(range)?.axes[2];
+                let (first, second) = wrap.derivative_bounds(z.lo.abs().max(z.hi.abs()));
+                (first * speed, second * speed * speed + first * acceleration)
+            }
+        })
     }
 
     pub(crate) fn elementary_point(&self, t: f64) -> Result<Point3, GeometryError> {
@@ -563,6 +767,7 @@ impl CurveGeometry {
                     index: *definition,
                 })
             }
+            Self::Wrapped { wrap, curve } => wrap.point(curve.elementary_point(t)?),
         })
     }
 
@@ -584,6 +789,9 @@ impl CurveGeometry {
                     kind: "intersection".into(),
                     index: *definition,
                 })
+            }
+            Self::Wrapped { wrap, curve } => {
+                wrap.push(curve.elementary_point(t)?, curve.elementary_tangent(t)?)
             }
         })
     }
@@ -619,6 +827,7 @@ impl CurveGeometry {
                 kind: "intersection".into(),
                 index: *definition,
             }),
+            Self::Wrapped { wrap, curve } => wrap.enclose(curve.elementary_bounds(range)?),
         }
     }
 
@@ -635,18 +844,13 @@ impl CurveGeometry {
                 "deflection must be finite and positive".into(),
             ));
         }
-        let bound = match self {
-            Self::Line { .. } => 0.0,
-            Self::Circle { radius, .. } => *radius,
-            Self::Ellipse { major_radius, .. } => *major_radius,
-            Self::Intersection { definition } => {
-                return Err(GeometryError::MissingReference {
-                    kind: "intersection".into(),
-                    index: *definition,
-                })
-            }
+        // Chord error of a span h is at most h^2 |C''| / 8.
+        let bound = self.derivative_bounds(range)?.1;
+        let closed = match self {
+            Self::Wrapped { curve, .. } => !matches!(**curve, Self::Line { .. }),
+            _ => true,
         };
-        let minimum = if bound > 0.0 && range.width() >= std::f64::consts::TAU - 1e-12 {
+        let minimum = if closed && bound > 0.0 && range.width() >= std::f64::consts::TAU - 1e-12 {
             3.0
         } else {
             1.0
@@ -689,7 +893,77 @@ mod tests {
                 major_radius: 3.0,
                 minor_radius: 1.0,
             },
+            // A hole wall through a bend: a flat cylinder along the radius.
+            SurfaceGeometry::Wrapped {
+                wrap: wrap(),
+                surface: Box::new(SurfaceGeometry::Cylinder {
+                    frame: Frame3 {
+                        origin: [1.0, 0.5, 3.0],
+                        ..Frame3::IDENTITY
+                    },
+                    radius: 0.8,
+                }),
+            },
+            // A slanted cut through a bend.
+            SurfaceGeometry::Wrapped {
+                wrap: wrap(),
+                surface: Box::new(SurfaceGeometry::Plane {
+                    frame: Frame3::from_axis([0.3, -0.2, 2.5], [1.0, 2.0, 0.3], [0.0, 0.0, 1.0])
+                        .unwrap(),
+                }),
+            },
         ]
+    }
+
+    fn wrap() -> Wrap {
+        Wrap {
+            frame: Frame3::from_axis([3.0, -2.0, 7.0], [1.0, 2.0, 3.0], [0.0, 1.0, 0.0]).unwrap(),
+            radius: 2.6,
+        }
+    }
+
+    #[test]
+    fn a_wrap_keeps_arc_length_on_its_radius_and_round_trips() {
+        let w = wrap();
+        let p = [1.3, -0.4, 2.6];
+        // On the wrap radius, flat x is arc length: the chord of x = 1.3.
+        let chord = norm(sub(w.point(p), w.point([0.0, -0.4, 2.6])));
+        assert!((chord - 2.0 * 2.6 * (1.3_f64 / 5.2).sin()).abs() < 1e-12);
+        let back = w.unwrap(w.point(p), None).unwrap();
+        assert!(norm(sub(back, p)) < 1e-12);
+        // Past half a turn, the hint picks the turn.
+        let far = [2.6 * 4.0, 0.0, 3.0];
+        assert!(norm(sub(w.unwrap(w.point(far), Some(far[0])).unwrap(), far)) < 1e-12);
+        let curve = CurveGeometry::Wrapped {
+            wrap: w,
+            curve: Box::new(CurveGeometry::Line {
+                origin: [0.0, 0.0, 2.0],
+                direction: [0.6, 0.8, 0.0],
+            }),
+        };
+        // A slanted flat line wraps to a helix: its speed is constant.
+        let speed = |t: f64| norm(curve.elementary_tangent(t).unwrap());
+        assert!((speed(0.1) - speed(3.0)).abs() < 1e-12);
+        let h = 1e-6;
+        let fd = scale(
+            sub(
+                curve.elementary_point(1.0 + h).unwrap(),
+                curve.elementary_point(1.0 - h).unwrap(),
+            ),
+            0.5 / h,
+        );
+        assert!(norm(sub(fd, curve.elementary_tangent(1.0).unwrap())) < 1e-8);
+        let bounds = curve
+            .elementary_bounds(Interval::new(0.0, 4.0).unwrap())
+            .unwrap();
+        for i in 0..=40 {
+            assert!(bounds.contains(curve.elementary_point(i as f64 / 10.0).unwrap()));
+        }
+        let nested = CurveGeometry::Wrapped {
+            wrap: w,
+            curve: Box::new(curve),
+        };
+        assert!(nested.validate().is_err());
     }
 
     #[test]
