@@ -79,9 +79,9 @@ impl Tessellation {
         }
         let orientation = dot(direction, normal);
         if !orientation.is_finite() || orientation == 0.0 {
-            return Err(GeometryError::UnresolvedTessellation(
-                "triangle orientation could not be resolved".into(),
-            ));
+            return Err(GeometryError::UnresolvedTessellation(format!(
+                "triangle orientation could not be resolved on face {face}"
+            )));
         }
         if orientation < 0.0 {
             ids.swap(1, 2);
@@ -1070,6 +1070,26 @@ fn general_curved_trimmed_face(
             uv.push(coordinate);
             points.push(point);
         }
+        // Samples along an axis-parallel pcurve can differ from the corner
+        // vertex next to them by rounding (it comes from another pcurve).
+        // Snap them, or the run is not quite straight and the triangulator
+        // cuts zero-area ears along it, which refinement then splits.
+        let magnitude = uv[start..]
+            .iter()
+            .flatten()
+            .fold(1.0_f64, |m, v| m.max(v.abs()));
+        let tolerance = 64.0 * f64::EPSILON * magnitude;
+        let n = ring.len();
+        for offset in 0..n {
+            let (i, previous) = (start + offset, start + (offset + n - 1) % n);
+            for axis in 0..2 {
+                if uv[i][axis] != uv[previous][axis]
+                    && (uv[i][axis] - uv[previous][axis]).abs() <= tolerance
+                {
+                    uv[i][axis] = uv[previous][axis];
+                }
+            }
+        }
         for offset in 0..ring.len() {
             let a = start + offset;
             let b = start + (offset + 1) % ring.len();
@@ -1118,9 +1138,10 @@ fn general_curved_trimmed_face(
             .checked_mul(4)
             .is_none_or(|count| count > max_triangles)
         {
-            return Err(GeometryError::LimitExceeded(
-                "curved trim refinement triangles".into(),
-            ));
+            return Err(GeometryError::LimitExceeded(format!(
+                "curved trim refinement triangles on face {} ('{}')",
+                face.id, face.key
+            )));
         }
         let mut midpoints = HashMap::with_capacity(split_edges.len());
         for &(a, b) in &split_edges {
