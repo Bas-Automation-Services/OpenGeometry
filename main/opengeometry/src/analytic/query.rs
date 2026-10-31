@@ -662,42 +662,57 @@ pub(crate) fn validate_orientation_validated(brep: &BrepEnvelope) -> Result<(), 
         Err(error) => return Err(error),
     };
 
-    // One probe point per face: the centroid of its largest triangle.
-    let mut probes: Vec<Option<(f64, Point3)>> = vec![None; brep.topology.faces.len()];
+    // Probe points per face: the centroids of its two largest triangles.
+    let mut probes: Vec<[Option<(f64, Point3)>; 2]> = vec![[None, None]; brep.topology.faces.len()];
     for (triangle, ids) in mesh.indices.chunks_exact(3).enumerate() {
         let p: [Point3; 3] = std::array::from_fn(|k| {
             std::array::from_fn(|j| mesh.positions[ids[k] as usize * 3 + j])
         });
         let area = norm(cross(sub(p[1], p[0]), sub(p[2], p[0])));
-        let probe = &mut probes[mesh.triangle_face_ids[triangle] as usize];
-        if probe.is_none_or(|(best, _)| area > best) {
-            *probe = Some((
-                area,
-                std::array::from_fn(|j| (p[0][j] + p[1][j] + p[2][j]) / 3.0),
-            ));
+        let centroid = std::array::from_fn(|j| (p[0][j] + p[1][j] + p[2][j]) / 3.0);
+        let face = &mut probes[mesh.triangle_face_ids[triangle] as usize];
+        if face[0].is_none_or(|(best, _)| area > best) {
+            face[1] = face[0];
+            face[0] = Some((area, centroid));
+        } else if face[1].is_none_or(|(second, _)| area > second) {
+            face[1] = Some((area, centroid));
         }
     }
 
     let offset = 100.0 * brep.accuracy.geometric;
     for (face, probe) in brep.topology.faces.iter().zip(probes) {
-        let Some((_, centroid)) = probe else {
-            continue;
-        };
         let surface = brep.geometry.surface(face.surface)?;
-        let uv = surface.project(centroid, None)?;
-        let Ok(normal) = surface.normal_at(uv) else {
+        // Inside in front of the face and outside behind it. A single ray can
+        // graze an edge and miscount, so a face is only reported when its
+        // second probe point agrees.
+        let inverted = |centroid: Point3| -> Result<Option<bool>, GeometryError> {
+            let uv = surface.project(centroid, None)?;
+            let Ok(normal) = surface.normal_at(uv) else {
+                return Ok(None);
+            };
+            let step = scale(unit(normal)?, face.sense.multiplier() * offset);
+            let on_face = surface.point_at(uv)?;
+            let front = classify_point_validated(brep, add(on_face, step))?;
+            let back = classify_point_validated(brep, sub(on_face, step))?;
+            Ok(Some(
+                front == PointClassification::Inside && back == PointClassification::Outside,
+            ))
+        };
+        let Some((_, first)) = probe[0] else {
             continue;
         };
-        let step = scale(unit(normal)?, face.sense.multiplier() * offset);
-        let on_face = surface.point_at(uv)?;
-        let front = classify_point_validated(brep, add(on_face, step))?;
-        let back = classify_point_validated(brep, sub(on_face, step))?;
-        if front == PointClassification::Inside && back == PointClassification::Outside {
-            return Err(GeometryError::InvalidTopology(format!(
-                "face {} ('{}') has its material normal pointing into the solid",
-                face.id, face.key
-            )));
+        if inverted(first)? != Some(true) {
+            continue;
         }
+        if let Some((_, second)) = probe[1] {
+            if inverted(second)? == Some(false) {
+                continue;
+            }
+        }
+        return Err(GeometryError::InvalidTopology(format!(
+            "face {} ('{}') has its material normal pointing into the solid",
+            face.id, face.key
+        )));
     }
     Ok(())
 }
