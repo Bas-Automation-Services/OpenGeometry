@@ -523,6 +523,13 @@ fn bounded_intersection_count(
     }
 }
 
+/// Fewest segments for an arc of this sweep: one per quarter turn (at
+/// least 4 for a full circle), so that a small hole, whose arcs a coarse
+/// deflection would leave at one segment each, still bounds a trim loop.
+fn arc_minimum(sweep: f64) -> usize {
+    ((sweep / std::f64::consts::FRAC_PI_2 - 1e-9).ceil() as usize).max(1)
+}
+
 fn edge_count(
     brep: &BrepEnvelope,
     id: u32,
@@ -535,31 +542,26 @@ fn edge_count(
             CurveGeometry::Line { .. } => Ok(1),
             CurveGeometry::Circle { radius, .. } => count(
                 range.width() * (radius / (8.0 * error)).sqrt(),
-                if range.width() >= std::f64::consts::TAU - 1e-12 {
-                    3
-                } else {
-                    1
-                },
+                arc_minimum(range.width()),
                 max_triangles,
             ),
             CurveGeometry::Ellipse { major_radius, .. } => count(
                 range.width() * (major_radius / (8.0 * error)).sqrt(),
-                if range.width() >= std::f64::consts::TAU - 1e-12 {
-                    3
-                } else {
-                    1
-                },
+                arc_minimum(range.width()),
                 max_triangles,
             ),
             CurveGeometry::Intersection { definition } => {
                 bounded_intersection_count(brep, *definition, curve, range, error, max_triangles)
             }
             geometry @ CurveGeometry::Wrapped { curve: flat, .. } => {
-                let closed = !matches!(**flat, CurveGeometry::Line { .. })
-                    && range.width() >= std::f64::consts::TAU - 1e-12;
+                // A wrapped circle or ellipse is parametrised by angle.
+                let arc = matches!(
+                    **flat,
+                    CurveGeometry::Circle { .. } | CurveGeometry::Ellipse { .. }
+                );
                 count(
                     range.width() * (geometry.derivative_bounds(range)?.1 / (8.0 * error)).sqrt(),
-                    if closed { 3 } else { 1 },
+                    if arc { arc_minimum(range.width()) } else { 1 },
                     max_triangles,
                 )
             }
