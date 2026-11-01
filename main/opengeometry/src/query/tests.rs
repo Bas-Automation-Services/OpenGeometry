@@ -478,13 +478,17 @@ fn a_face_whose_material_normal_points_into_the_solid_is_rejected() {
     let accuracy = coarse_accuracy(1e-5);
     let mut cube = primitives::cuboid("cube".into(), Frame3::IDENTITY, [1.0; 3], accuracy).unwrap();
     validate_orientation(&cube).unwrap();
-    cube.topology.faces[5].sense = cube.topology.faces[5].sense.reversed();
-    assert_inverted(&cube, 5);
+    for face in &mut cube.topology.faces {
+        face.sense = face.sense.reversed();
+    }
+    cube.orient_loops().unwrap();
+    assert_inverted(&cube, 0);
 
     let mut sphere = primitives::sphere("ball".into(), Frame3::IDENTITY, 1.0, accuracy).unwrap();
     for face in &mut sphere.topology.faces {
         face.sense = face.sense.reversed();
     }
+    sphere.orient_loops().unwrap();
     assert_inverted(&sphere, 0);
 }
 

@@ -53,7 +53,7 @@ fn raisable(brep: &BrepEnvelope, edge: u32, planar: bool) -> bool {
     };
     match brep.geometry.curves[curve as usize] {
         CurveGeometry::Circle { .. } | CurveGeometry::Ellipse { .. } => true,
-        CurveGeometry::Intersection { .. } => !planar,
+        CurveGeometry::Intersection { .. } | CurveGeometry::Wrapped { .. } => !planar,
         CurveGeometry::Line { .. } => false,
     }
 }
