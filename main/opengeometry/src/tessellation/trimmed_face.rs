@@ -5,7 +5,7 @@ use super::trim::{
 };
 use crate::brep::{BrepEnvelope, Face, GeometryError, Surface, SurfaceGeometry};
 use crate::geom2d::{point_in_ring2, Pt2};
-use crate::math::{scale, Interval, Point3};
+use crate::math::{cross, dot, norm, scale, sub, Interval, Point3};
 use std::collections::{BTreeSet, HashMap};
 
 const COUNT_ROUNDING: f64 = 1e-9;
@@ -254,17 +254,32 @@ fn general_curved_trimmed_face(
         let normal = trim_normal(brep, face, surface, *coordinate)?;
         mesh.vertex(point, normal)?;
     }
+    // Earcut and refinement give every triangle the same winding, so one
+    // seen edge-on from the surface normal (samples along one straight trim
+    // edge, collinear in uv but on a curve in 3D) turns like the others.
+    let mut oriented = Vec::with_capacity(triangles.len());
+    let mut flip = None;
     for triangle in triangles {
+        let ids = triangle.map(|index| (start + index) as u32);
         let center = std::array::from_fn(|axis| {
             (uv[triangle[0]][axis] + uv[triangle[1]][axis] + uv[triangle[2]][axis]) / 3.0
         });
         let normal = trim_normal(brep, face, surface, center)?;
-        mesh.triangle(
-            triangle.map(|index| (start + index) as u32),
-            face.id,
-            normal,
-            max_triangles,
-        )?;
+        let [a, b, c] = ids.map(|id| mesh.point(id));
+        let direction = cross(sub(b, a), sub(c, a));
+        let along = dot(direction, normal);
+        let edge_on = along.abs() <= 1e-6 * norm(direction);
+        if !edge_on && flip.is_none() {
+            flip = Some(along < 0.0);
+        }
+        oriented.push((ids, normal, direction, edge_on));
+    }
+    for (ids, normal, direction, edge_on) in oriented {
+        let normal = match (edge_on, flip) {
+            (true, Some(flip)) => scale(direction, if flip { -1.0 } else { 1.0 }),
+            _ => normal,
+        };
+        mesh.triangle(ids, face.id, normal, max_triangles)?;
     }
     Ok(())
 }
