@@ -37,13 +37,124 @@ fn surfaces() -> Vec<SurfaceGeometry> {
                     .unwrap(),
             }),
         },
+        SurfaceGeometry::Wrapped {
+            wrap: cone_wrap(0.5),
+            surface: Box::new(SurfaceGeometry::Cylinder {
+                frame: Frame3 {
+                    origin: [1.0, 0.5, 3.0],
+                    ..Frame3::IDENTITY
+                },
+                radius: 0.8,
+            }),
+        },
+        SurfaceGeometry::Wrapped {
+            wrap: cone_wrap(-0.7),
+            surface: Box::new(SurfaceGeometry::Plane {
+                frame: Frame3::from_axis([0.3, -0.2, 2.5], [1.0, 2.0, 0.3], [0.0, 0.0, 1.0])
+                    .unwrap(),
+            }),
+        },
     ]
+}
+
+fn cone_wrap(semi_angle: f64) -> Wrap {
+    Wrap {
+        semi_angle,
+        ..wrap()
+    }
+}
+
+#[test]
+fn a_cone_wrap_develops_its_cone_and_round_trips() {
+    for semi_angle in [0.5, -0.7, 1e-3] {
+        let w = cone_wrap(semi_angle);
+        let (s, c) = semi_angle.sin_cos();
+        let r = w.radius;
+        for psi in [0.0_f64, 0.4, -1.1] {
+            let k = s / r;
+            let p = [psi.sin() / k, (psi.cos() - 1.0) / k, r];
+            let l = w.frame.local(w.point(p));
+            assert!((l[0].hypot(l[1]) - r).abs() < 1e-12 && l[2].abs() < 1e-12);
+            let turn = psi / s;
+            assert!((l[0] - r * turn.cos()).abs() < 1e-9 && (l[1] - r * turn.sin()).abs() < 1e-9);
+        }
+        let l = w.frame.local(w.point([0.0, 1.5, r + 0.25]));
+        assert!((l[0] - (r + 1.5 * s + 0.25 * c)).abs() < 1e-12);
+        assert!((l[2] - (1.5 * c - 0.25 * s)).abs() < 1e-12);
+        for p in [[0.9, -0.6, r], [-1.7, 0.8, r]] {
+            let (dx, dy) = (w.push(p, [1.0, 0.0, 0.0]), w.push(p, [0.0, 1.0, 0.0]));
+            assert!((norm(dx) - 1.0).abs() < 1e-12 && (norm(dy) - 1.0).abs() < 1e-12);
+            assert!(dot(dx, dy).abs() < 1e-12);
+            let h = 1e-6;
+            for (i, v) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+                .iter()
+                .enumerate()
+            {
+                let at =
+                    |t: f64| w.point([p[0] + t * v[0], p[1] + t * v[1], p[2] + 0.3 + t * v[2]]);
+                let fd = scale(sub(at(h), at(-h)), 0.5 / h);
+                let q = [p[0], p[1], p[2] + 0.3];
+                assert!(norm(sub(fd, w.push(q, *v))) < 1e-8, "{semi_angle} push {i}");
+                for (j, u) in [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+                    .iter()
+                    .enumerate()
+                {
+                    let pu =
+                        |t: f64| w.push([q[0] + t * u[0], q[1] + t * u[1], q[2] + t * u[2]], *v);
+                    let fd = scale(sub(pu(h), pu(-h)), 0.5 / h);
+                    assert!(
+                        norm(sub(fd, w.second(q, *v, *u))) < 1e-7,
+                        "{semi_angle} second {i} {j}"
+                    );
+                }
+            }
+            let back = w.flatten(w.point(p), Some(p)).unwrap();
+            assert!(norm(sub(back, p)) < 1e-11);
+        }
+        let far = [r * 4.0 * s.abs().max(0.6), 0.3, r - 0.2];
+        if w.on_cone_theta(far).abs() > std::f64::consts::PI {
+            assert!(norm(sub(w.flatten(w.point(far), None).unwrap(), far)) > 1e-3);
+        }
+        assert!(norm(sub(w.flatten(w.point(far), Some(far)).unwrap(), far)) < 1e-10);
+        let curve = CurveGeometry::Wrapped {
+            wrap: w,
+            curve: Box::new(CurveGeometry::Circle {
+                frame: Frame3 {
+                    origin: [1.0, 0.5, r + 0.4],
+                    ..Frame3::IDENTITY
+                },
+                radius: 0.8,
+            }),
+        };
+        let range = Interval::new(0.0, std::f64::consts::TAU).unwrap();
+        let bounds = curve.elementary_bounds(range).unwrap();
+        let samples = curve.sample_elementary(range, 1e-3, 100_000).unwrap();
+        let n = samples.len() - 1;
+        for i in 0..n {
+            for k in 1..8 {
+                let t = range.width() * (i as f64 + k as f64 / 8.0) / n as f64;
+                let p = curve.elementary_point(t).unwrap();
+                assert!(bounds.contains(p));
+                let (a, b) = (samples[i], samples[i + 1]);
+                let ab = sub(b, a);
+                let along = dot(sub(p, a), ab) / dot(ab, ab);
+                let foot = [0, 1, 2].map(|j| a[j] + along * ab[j]);
+                assert!(norm(sub(p, foot)) <= 1e-3);
+            }
+        }
+    }
+    let bad = Wrap {
+        semi_angle: std::f64::consts::FRAC_PI_2,
+        ..wrap()
+    };
+    assert!(bad.validate().is_err());
 }
 
 fn wrap() -> Wrap {
     Wrap {
         frame: Frame3::from_axis([3.0, -2.0, 7.0], [1.0, 2.0, 3.0], [0.0, 1.0, 0.0]).unwrap(),
         radius: 2.6,
+        semi_angle: 0.0,
     }
 }
 
@@ -56,7 +167,7 @@ fn a_wrap_keeps_arc_length_on_its_radius_and_round_trips() {
     let back = w.flatten(w.point(p), None).unwrap();
     assert!(norm(sub(back, p)) < 1e-12);
     let far = [2.6 * 4.0, 0.0, 3.0];
-    assert!(norm(sub(w.flatten(w.point(far), Some(far[0])).unwrap(), far)) < 1e-12);
+    assert!(norm(sub(w.flatten(w.point(far), Some(far)).unwrap(), far)) < 1e-12);
     let curve = CurveGeometry::Wrapped {
         wrap: w,
         curve: Box::new(CurveGeometry::Line {
