@@ -225,7 +225,7 @@ fn surface_numbers(surface: &SurfaceGeometry, numbers: &mut Vec<f64>) {
         }
         SurfaceGeometry::Wrapped { wrap, surface } => {
             frame_numbers(wrap.frame, numbers);
-            numbers.push(wrap.radius);
+            numbers.extend([wrap.radius, wrap.semi_angle]);
             surface_numbers(surface, numbers);
         }
         SurfaceGeometry::Conoid { frame, c } => {
@@ -258,7 +258,7 @@ fn curve_numbers(curve: &CurveGeometry, numbers: &mut Vec<f64>) {
         CurveGeometry::Intersection { definition } => index_numbers([definition], numbers),
         CurveGeometry::Wrapped { wrap, curve } => {
             frame_numbers(wrap.frame, numbers);
-            numbers.push(wrap.radius);
+            numbers.extend([wrap.radius, wrap.semi_angle]);
             curve_numbers(curve, numbers);
         }
     }

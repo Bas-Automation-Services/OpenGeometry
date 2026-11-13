@@ -96,8 +96,7 @@ impl CurveGeometry {
             }
             Self::Wrapped { wrap, curve } => {
                 let (speed, acceleration) = curve.derivative_bounds(range)?;
-                let z = curve.elementary_bounds(range)?.axes[2];
-                let (first, second) = wrap.derivative_bounds(z.lo.abs().max(z.hi.abs()));
+                let (first, second) = wrap.derivative_bounds(curve.elementary_bounds(range)?)?;
                 (first * speed, second * speed * speed + first * acceleration)
             }
         })

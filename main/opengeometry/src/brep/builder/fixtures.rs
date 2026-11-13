@@ -37,6 +37,7 @@ impl Sector {
             frame: Frame3::from_axis([1.0, 2.0, 3.0], [0.2, 1.0, 0.1], [1.0, 0.0, 0.3])
                 .expect("sector frame"),
             radius: self.wrap_radius,
+            semi_angle: 0.0,
         }
     }
 

@@ -456,7 +456,7 @@ fn wrapped_derivatives(
 
 fn wrapped_normal(wrap: &Wrap, surface: &SurfaceGeometry, uv: UV) -> Result<Point3, GeometryError> {
     let p = surface.point_at(uv)?;
-    if p[2] <= 0.0 {
+    if !wrap.regular(p) {
         return Err(GeometryError::SingularParameterization);
     }
     unit(wrap.push_normal(p, surface.normal_at(uv)?))
@@ -468,9 +468,9 @@ fn wrapped_project(
     p: Point3,
     hint: Option<UV>,
 ) -> Result<UV, GeometryError> {
-    let hint_x = match hint {
-        Some(h) => Some(surface.point_at(h)?[0]),
+    let near = match hint {
+        Some(h) => Some(surface.point_at(h)?),
         None => None,
     };
-    surface.project(wrap.flatten(p, hint_x)?, hint)
+    surface.project(wrap.flatten(p, near)?, hint)
 }
