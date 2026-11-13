@@ -213,14 +213,16 @@ impl Wrap {
         let s = self.semi_angle.sin();
         let k = Interval::point(s / self.radius)?;
         let a = Interval::point(1.0)?.add_interval(y.mul_interval(k)?)?;
-        if a.lo <= 0.0 {
+        let b = x.mul_interval(k)?;
+        if a.lo <= 0.0 && b.contains(0.0) {
             return Ok(None);
         }
-        let b = x.mul_interval(k)?;
         let e = a.square()?.add_interval(b.square()?)?.sqrt()?;
-        let ratio = b.div_interval(a)?;
+        let corners =
+            [(b.lo, a.lo), (b.lo, a.hi), (b.hi, a.lo), (b.hi, a.hi)].map(|(b, a)| b.atan2(a));
+        let lo = corners.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = corners.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let pad = |v: f64| 4.0 * f64::EPSILON * (1.0 + v.abs());
-        let (lo, hi) = (ratio.lo.atan(), ratio.hi.atan());
         let (lo, hi) = if s > 0.0 {
             (lo / s, hi / s)
         } else {

@@ -2,6 +2,7 @@ use super::conoid::conoid_ellipse;
 use super::curve::CurveGeometry;
 use super::surface::{Surface, SurfaceGeometry};
 use super::wrap::Wrap;
+use crate::brep::bounds::PatchBounds;
 use crate::brep::error::GeometryError;
 use crate::brep::frame::Frame3;
 use crate::math::{cross, dot, norm, scale, sub, Interval};
@@ -149,6 +150,40 @@ fn a_cone_wrap_develops_its_cone_and_round_trips() {
                 let along = dot(sub(p, a), ab) / dot(ab, ab);
                 let foot = [0, 1, 2].map(|j| a[j] + along * ab[j]);
                 assert!(norm(sub(p, foot)) <= 1e-3);
+            }
+        }
+    }
+    for semi_angle in [0.9_f64, -0.9] {
+        let w = cone_wrap(semi_angle);
+        let k = semi_angle.sin() / w.radius;
+        for (psi, rho) in [(2.0_f64, 0.7), (-2.6, 1.3), (3.0, 0.5)] {
+            let over_the_cut = psi == 3.0;
+            let centre = [rho * psi.sin() / k, (rho * psi.cos() - 1.0) / k];
+            let half = 0.2 * rho / k.abs();
+            let flat = PatchBounds {
+                axes: [
+                    Interval::new(centre[0] - half, centre[0] + half).unwrap(),
+                    Interval::new(centre[1] - half, centre[1] + half).unwrap(),
+                    Interval::new(w.radius - 0.3, w.radius + 0.3).unwrap(),
+                ],
+            };
+            if over_the_cut {
+                assert!(w.enclose(flat).is_err());
+                continue;
+            }
+            let bounds = w.enclose(flat).unwrap();
+            assert!(w.derivative_bounds(flat).is_ok());
+            for i in 0..=10 {
+                for j in 0..=10 {
+                    for z in [-0.3, 0.3] {
+                        let p = [
+                            centre[0] - half + 2.0 * half * i as f64 / 10.0,
+                            centre[1] - half + 2.0 * half * j as f64 / 10.0,
+                            w.radius + z,
+                        ];
+                        assert!(bounds.contains(w.point(p)), "{semi_angle} {psi}");
+                    }
+                }
             }
         }
     }
