@@ -1,6 +1,6 @@
 use super::conoid;
 use super::turned::{lift, narrowed, reached, ring_axis, swept_axis};
-use super::wrap::Wrap;
+use super::wrap::{Wrap, WRAP_SPLITS};
 use crate::brep::bounds::PatchBounds;
 use crate::brep::error::GeometryError;
 use crate::brep::frame::{checked, unit, Frame3, UVBox, UV};
@@ -384,7 +384,9 @@ impl Surface for SurfaceGeometry {
                     v.sin()?.mul_interval(a)?,
                 ]
             }
-            Self::Wrapped { wrap, surface } => return wrap.enclose(surface.enclose(domain)?),
+            Self::Wrapped { wrap, surface } => {
+                return wrap.enclose_parts(&|d| surface.enclose(d), &halves, domain, WRAP_SPLITS)
+            }
             Self::Conoid { c, .. } => conoid::local_bounds(c, domain)?,
         };
         let bounds = self.frame().bounds(local)?;
@@ -473,4 +475,20 @@ fn wrapped_project(
         None => None,
     };
     surface.project(wrap.flatten(p, near)?, hint)
+}
+
+fn halves(domain: UVBox) -> [UVBox; 2] {
+    let axis = usize::from(domain[0].width() <= 0.0);
+    let mid = 0.5 * (domain[axis].lo + domain[axis].hi);
+    let mut a = domain;
+    let mut b = domain;
+    a[axis] = Interval {
+        lo: domain[axis].lo,
+        hi: mid,
+    };
+    b[axis] = Interval {
+        lo: mid,
+        hi: domain[axis].hi,
+    };
+    [a, b]
 }
