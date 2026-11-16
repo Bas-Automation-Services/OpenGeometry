@@ -1,4 +1,5 @@
 use super::entities::{bspline_curve, point, real, refs};
+use super::unit::Scale;
 use crate::brep::{BrepEnvelope, EdgeGeometry, GeometryError, Surface, SurfaceGeometry, UVBox};
 use crate::exchange::fit_bezier::{fit_curve, fit_surface, FittedSurface};
 use crate::exchange::part21::Part21Writer;
@@ -22,7 +23,7 @@ pub(super) fn add_fitted_surface(
     brep: &BrepEnvelope,
     surface_id: u32,
     budget: f64,
-    scale: f64,
+    scale: Scale,
 ) -> Result<(usize, f64), GeometryError> {
     check_budget(budget)?;
     let surface = brep.geometry.surface(surface_id)?;
@@ -56,7 +57,7 @@ fn reached_past(surface: &SurfaceGeometry, domain: UVBox) -> Result<UVBox, Geome
     Ok([side(0)?, side(1)?])
 }
 
-fn bspline_surface(writer: &mut Part21Writer, fitted: &FittedSurface, scale: f64) -> usize {
+fn bspline_surface(writer: &mut Part21Writer, fitted: &FittedSurface, scale: Scale) -> usize {
     let rows = fitted
         .controls
         .iter()
@@ -97,7 +98,7 @@ pub(super) fn add_wrapped_curve(
     brep: &BrepEnvelope,
     curve_id: u32,
     budget: f64,
-    scale: f64,
+    scale: Scale,
 ) -> Result<(usize, f64), GeometryError> {
     check_budget(budget)?;
     let range = brep

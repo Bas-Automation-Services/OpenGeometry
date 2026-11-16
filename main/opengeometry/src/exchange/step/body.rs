@@ -1,6 +1,7 @@
 use super::entities::{
     bspline_curve, curve, pcurve, placement, point, real, refs, sense, PcurveOnSurface,
 };
+use super::unit::Scale;
 use super::wrapped::{add_fitted_surface, add_wrapped_curve};
 use crate::brep::{
     BrepEnvelope, CurveGeometry, Edge, EdgeGeometry, GeometryError, Orientation, PcurveGeometry,
@@ -22,7 +23,7 @@ pub(super) struct BodyEmission {
 
 struct BodyEntities<'a> {
     brep: &'a BrepEnvelope,
-    scale: f64,
+    scale: Scale,
     context2: usize,
     surfaces: &'a [Option<usize>],
     vertices: &'a [usize],
@@ -38,7 +39,7 @@ struct EdgeEmission {
 pub(super) fn emit_body(
     writer: &mut Part21Writer,
     brep: &BrepEnvelope,
-    scale: f64,
+    scale: Scale,
     context2: usize,
     mut exchange_bound: f64,
 ) -> Result<BodyEmission, GeometryError> {
@@ -86,7 +87,7 @@ pub(super) fn emit_body(
 fn add_surfaces(
     writer: &mut Part21Writer,
     brep: &BrepEnvelope,
-    scale: f64,
+    scale: Scale,
     fitting_budget: f64,
 ) -> Result<(Vec<Option<usize>>, f64), GeometryError> {
     let mut surfaces = vec![None; brep.geometry.surfaces.len()];
@@ -138,7 +139,7 @@ fn add_surfaces(
     Ok((surfaces, fitting_error))
 }
 
-fn add_vertices(writer: &mut Part21Writer, brep: &BrepEnvelope, scale: f64) -> Vec<usize> {
+fn add_vertices(writer: &mut Part21Writer, brep: &BrepEnvelope, scale: Scale) -> Vec<usize> {
     brep.topology
         .vertices
         .iter()
@@ -229,7 +230,7 @@ fn add_fitted_curve(
     brep: &BrepEnvelope,
     definition: u32,
     fitting_budget: f64,
-    scale: f64,
+    scale: Scale,
     fitting_error: &mut f64,
 ) -> Result<(usize, FittedIntersectionCurve), GeometryError> {
     if fitting_budget <= 0.0 {
