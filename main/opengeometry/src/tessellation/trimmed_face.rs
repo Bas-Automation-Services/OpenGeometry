@@ -1,3 +1,4 @@
+use super::delaunay::delaunay_flips;
 use super::grid::Rect;
 use super::mesh::Tessellation;
 use super::trim::{
@@ -226,7 +227,9 @@ fn general_curved_trimmed_face(
     let boundary_count = uv.len();
     let mut triangles = earcut_triangles(&uv, &holes)?;
     let surface = brep.geometry.surface(face.surface)?;
+    let metric = uv_metric(surface, &uv[..loops[0].len()])?;
     for _ in 0..128 {
+        delaunay_flips(&mut triangles, &uv, metric, &boundary_edges);
         let split_edges = edges_to_split(&triangles, &boundary_edges, surface, &uv, error);
         if split_edges.is_empty() {
             break;
@@ -299,6 +302,18 @@ fn snap_rounding_noise(ring: &mut [[f64; 2]]) {
                 ring[index][axis] = previous[axis];
             }
         }
+    }
+}
+
+fn uv_metric(surface: &SurfaceGeometry, outer: &[[f64; 2]]) -> Result<[f64; 2], GeometryError> {
+    let count = outer.len().max(1) as f64;
+    let center = [0, 1].map(|axis| outer.iter().map(|uv| uv[axis]).sum::<f64>() / count);
+    let jet = surface.derivatives(center)?;
+    let metric = [norm(jet.du), norm(jet.dv)];
+    if metric.iter().all(|value| value.is_finite() && *value > 0.0) {
+        Ok(metric)
+    } else {
+        Ok([1.0, 1.0])
     }
 }
 
