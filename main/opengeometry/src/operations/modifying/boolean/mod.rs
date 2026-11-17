@@ -1,6 +1,7 @@
 mod assembly;
 mod batch;
 mod dispatch;
+mod general;
 mod handlers;
 mod multi_tool;
 mod operands;
