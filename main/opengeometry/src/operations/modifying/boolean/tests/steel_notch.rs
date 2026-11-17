@@ -37,7 +37,7 @@ fn arc(center: [f64; 2], radius: f64, start_angle: f64, sweep_angle: f64) -> Pro
 fn i_section(r: f64) -> Vec<ProfileEdge> {
     let (b, h, w, f) = (B / 2.0, H / 2.0, TW / 2.0, TF);
     let mut edges = vec![line([-b, -h], [b, -h]), line([b, -h], [b, -h + f])];
-    let mut fillet = |edges: &mut Vec<ProfileEdge>, center: [f64; 2], start: f64| {
+    let fillet = |edges: &mut Vec<ProfileEdge>, center: [f64; 2], start: f64| {
         if r > 0.0 {
             edges.push(arc(center, r, start, -FRAC_PI_2));
         }

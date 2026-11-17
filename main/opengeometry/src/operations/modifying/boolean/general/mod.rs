@@ -15,11 +15,14 @@
 //!    are sewn into one B-rep by their edges' geometry (`sew`): vertices where the curves through
 //!    them meet, shells by adjacency, voids into the solid round them.
 //!
-//! Faces that lie on one surface (coincident) are refused for now.
+//! Faces on one surface (coincident) imprint each other's edges where they lie on the other
+//! (`imprint`); a region on the other solid's boundary is kept by whether the two faces point the
+//! same way.
 
 mod arrangement;
 mod curve;
 mod flat;
+mod imprint;
 mod pieces;
 mod sew;
 
@@ -29,12 +32,23 @@ use crate::brep::{
     Accuracy, BrepEnvelope, FaceProvenance, FaceRole, FaceSource, GeometryError, GeometryQuality,
 };
 use crate::intersection::intersect_breps;
+use crate::math::dot;
 use crate::query::{Classifier, PointClassification};
 use arrangement::{reversed_loop, ring};
 use curve::CurveRef;
-use flat::{inside_point, Flat};
+use flat::{inside_point, signed_area, Flat};
+use imprint::imprint;
 use pieces::{Cut, Operand};
 use sew::{sew, Kept};
+
+/// Where a region lies against the other solid; on its boundary, facing the same way or not.
+#[derive(Clone, Copy)]
+enum Located {
+    Out,
+    In,
+    OnSame,
+    OnOpposite,
+}
 
 fn gap(message: &str) -> GeometryError {
     GeometryError::CoverageGap {
@@ -55,7 +69,7 @@ pub(crate) fn general_boolean(
     let mut contacts = Vec::new();
     for pair in &graph.pairs {
         if pair.graph.coincident {
-            return Err(gap("faces on one surface"));
+            imprint(&mut operands, pair.faces)?;
         }
         contacts.extend(pair.graph.contacts.iter().copied());
         for branch in &pair.graph.branches {
@@ -96,23 +110,43 @@ pub(crate) fn general_boolean(
             for region in operand.regions(face)? {
                 let map = &operand.maps[face as usize];
                 let rings: Vec<Vec<Flat>> = region.loops.iter().map(|l| ring(l)).collect();
+                if rings.iter().any(|r| sliver(r, snap)) {
+                    return Err(GeometryError::UnresolvedIntersection(
+                        "general boolean: a face piece is a sliver below geometric resolution"
+                            .into(),
+                    ));
+                }
                 let inside =
                     inside_point(&rings).ok_or_else(|| gap("no point found inside a face"))?;
                 let place = classifiers[1 - side].classify(map.point(inside)?)?;
-                let flip = match (operation, side, place) {
-                    (_, _, PointClassification::Boundary) => {
-                        return Err(gap("faces on one surface"))
+                let place = match place {
+                    PointClassification::Boundary => {
+                        let p = map.point(inside)?;
+                        let other = operands[1 - side]
+                            .normal_at(p)?
+                            .ok_or_else(|| gap("a face on the other solid's boundary"))?;
+                        if dot(other, map.normal(inside)?) > 0.0 {
+                            Located::OnSame
+                        } else {
+                            Located::OnOpposite
+                        }
                     }
-                    (_, _, PointClassification::Unknown) => {
+                    PointClassification::Inside => Located::In,
+                    PointClassification::Outside => Located::Out,
+                    PointClassification::Unknown => {
                         return Err(GeometryError::UnresolvedIntersection(
                             "general boolean: a face cannot be located against the other solid"
                                 .into(),
                         ))
                     }
-                    (BooleanOp::Union, _, PointClassification::Outside)
-                    | (BooleanOp::Intersection, _, PointClassification::Inside)
-                    | (BooleanOp::Subtraction, 0, PointClassification::Outside) => false,
-                    (BooleanOp::Subtraction, 1, PointClassification::Inside) => true,
+                };
+                let flip = match (operation, side, place) {
+                    (BooleanOp::Union, 0, Located::Out | Located::OnSame)
+                    | (BooleanOp::Union, 1, Located::Out)
+                    | (BooleanOp::Intersection, 0, Located::In | Located::OnSame)
+                    | (BooleanOp::Intersection, 1, Located::In)
+                    | (BooleanOp::Subtraction, 0, Located::Out | Located::OnOpposite) => false,
+                    (BooleanOp::Subtraction, 1, Located::In) => true,
                     _ => continue,
                 };
                 let source = operand.brep.topology.faces[face as usize].clone();
@@ -178,4 +212,15 @@ pub(crate) fn general_boolean(
             face_mappings,
         },
     })
+}
+
+/// A ring narrower than the snap everywhere: its area no more than the snap times its length.
+fn sliver(ring: &[Flat], snap: f64) -> bool {
+    let length: f64 = (0..ring.len())
+        .map(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            (b[0] - a[0]).hypot(b[1] - a[1])
+        })
+        .sum();
+    signed_area(ring).abs() <= snap * length
 }

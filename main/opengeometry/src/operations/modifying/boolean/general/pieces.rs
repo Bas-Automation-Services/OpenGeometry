@@ -1,6 +1,7 @@
 use super::arrangement::{faces, reversed_loop, Use};
 use super::curve::CurveRef;
-use super::flat::{distance_to_polyline, halfedge_flat, FaceMap, Flat};
+use super::flat::{distance_to_polyline, halfedge_flat, winding, FaceMap, Flat};
+use super::imprint::Place;
 use crate::brep::{BrepEnvelope, EdgeGeometry, GeometryError, Orientation, Surface};
 use crate::math::{norm, sub, Point3};
 use std::collections::HashMap;
@@ -143,32 +144,113 @@ impl<'a> Operand<'a> {
     pub(super) fn split_at(&mut self, face: u32, p: Point3) -> Result<(), GeometryError> {
         for halfedges in self.face_loops(face) {
             for h in halfedges {
-                let edge = self.brep.topology.halfedges[h as usize].edge;
-                let range = self.brep.topology.edges[edge as usize].geometry.range();
-                let curve = self.edge_curve(edge)?;
-                let t = curve.parameter(p, 0.5 * (range.lo + range.hi))?;
-                let t = if curve.periodic() {
-                    range.lo + (t - range.lo).rem_euclid(TAU)
-                } else {
-                    t
-                };
-                if t < range.lo || t > range.hi || norm(sub(curve.point(t)?, p)) > self.snap {
-                    continue;
-                }
-                let ends = [curve.point(range.lo)?, curve.point(range.hi)?];
-                if ends.iter().any(|e| norm(sub(*e, p)) <= self.snap) {
-                    continue;
-                }
-                let mut fresh = true;
-                for s in &self.splits[edge as usize] {
-                    fresh &= norm(sub(curve.point(*s)?, p)) > self.snap;
-                }
-                if fresh {
-                    self.splits[edge as usize].push(t);
-                }
+                self.split_edge_at(self.brep.topology.halfedges[h as usize].edge, p)?;
             }
         }
         Ok(())
+    }
+
+    /// Splits the edge at the point when it lies on it, away from its ends.
+    pub(super) fn split_edge_at(&mut self, edge: u32, p: Point3) -> Result<(), GeometryError> {
+        let range = self.brep.topology.edges[edge as usize].geometry.range();
+        let curve = self.edge_curve(edge)?;
+        let t = curve.parameter(p, 0.5 * (range.lo + range.hi))?;
+        let t = if curve.periodic() {
+            range.lo + (t - range.lo).rem_euclid(TAU)
+        } else {
+            t
+        };
+        if t < range.lo || t > range.hi || norm(sub(curve.point(t)?, p)) > self.snap {
+            return Ok(());
+        }
+        let ends = [curve.point(range.lo)?, curve.point(range.hi)?];
+        if ends.iter().any(|e| norm(sub(*e, p)) <= self.snap) {
+            return Ok(());
+        }
+        let mut fresh = true;
+        for s in &self.splits[edge as usize] {
+            fresh &= norm(sub(curve.point(*s)?, p)) > self.snap;
+        }
+        if fresh {
+            self.splits[edge as usize].push(t);
+        }
+        Ok(())
+    }
+
+    pub(super) fn snap(&self) -> f64 {
+        self.snap
+    }
+
+    /// The face's edges, each once, with their curves and ranges.
+    pub(super) fn face_edges(
+        &self,
+        face: u32,
+    ) -> Result<Vec<(u32, CurveRef<'a>, f64, f64)>, GeometryError> {
+        let mut result: Vec<(u32, CurveRef<'a>, f64, f64)> = Vec::new();
+        for halfedges in self.face_loops(face) {
+            for h in halfedges {
+                let edge = self.brep.topology.halfedges[h as usize].edge;
+                if result.iter().any(|(e, ..)| *e == edge) {
+                    continue;
+                }
+                let range = self.brep.topology.edges[edge as usize].geometry.range();
+                result.push((edge, self.edge_curve(edge)?, range.lo, range.hi));
+            }
+        }
+        Ok(result)
+    }
+
+    /// An edge of the face in its flat, in the edge's own direction, with the sample parameters.
+    pub(super) fn edge_flat(
+        &self,
+        face: u32,
+        edge: u32,
+    ) -> Result<(Vec<f64>, Vec<Flat>), GeometryError> {
+        let h = self
+            .face_loops(face)
+            .into_iter()
+            .flatten()
+            .find(|&h| self.brep.topology.halfedges[h as usize].edge == edge)
+            .ok_or_else(|| gap("edge not on face"))?;
+        let range = self.brep.topology.edges[edge as usize].geometry.range();
+        let stations = self.edge_curve(edge)?.stations(range.lo, range.hi);
+        let flat = halfedge_flat(self.brep, &self.maps[face as usize], h, &stations)?;
+        Ok((stations, flat))
+    }
+
+    /// Where a point on the face's surface lies against the face.
+    pub(super) fn locate(&self, face: u32, p: Point3) -> Result<Place, GeometryError> {
+        let flat = self.flat_of(face, p)?;
+        let rings = &self.rings[face as usize];
+        if rings.iter().any(|ring| {
+            let mut closed = ring.clone();
+            closed.push(ring[0]);
+            distance_to_polyline(flat, &closed) <= self.snap
+        }) {
+            return Ok(Place::Boundary);
+        }
+        Ok(if winding(flat, rings) != 0 {
+            Place::Inside
+        } else {
+            Place::Outside
+        })
+    }
+
+    /// The outward normal of the face of this solid a point lies on, when it lies on one.
+    pub(super) fn normal_at(&self, p: Point3) -> Result<Option<Point3>, GeometryError> {
+        for face in 0..self.maps.len() {
+            let map = &self.maps[face];
+            let Ok(uv) = map.surface.project(p, Some(map.window)) else {
+                continue;
+            };
+            if norm(sub(map.surface.point_at(uv)?, p)) > self.snap {
+                continue;
+            }
+            if self.locate(face as u32, p)? != Place::Outside {
+                return Ok(Some(map.normal(map.flat(uv))?));
+            }
+        }
+        Ok(None)
     }
 
     /// Where the face's cuts run across its seams: the seam edges split there, and the cut curves'

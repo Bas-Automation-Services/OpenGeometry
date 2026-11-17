@@ -319,12 +319,14 @@ pub(super) fn generic_boolean(
     match record_handler(trace, HandlerId::GeneralBoolean, || {
         general_boolean(a, b, operation, id)
     }) {
-        Err(GeometryError::CoverageGap { .. }) => Err(GeometryError::CoverageGap {
-            families: [
-                "generic analytic solid".into(),
-                "intersecting analytic solid".into(),
-            ],
-        }),
+        Err(GeometryError::CoverageGap { .. } | GeometryError::UnresolvedIntersection(_)) => {
+            Err(GeometryError::CoverageGap {
+                families: [
+                    "generic analytic solid".into(),
+                    "intersecting analytic solid".into(),
+                ],
+            })
+        }
         result => result,
     }
 }

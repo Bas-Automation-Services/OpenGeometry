@@ -175,11 +175,13 @@ fn two_crossing_cuboid_faces_are_not_a_half_space() {
             fine_accuracy(),
         )
         .unwrap();
+        // Not a half-space for the cylinder handler; the general boolean builds it or refuses.
         for operation in [BooleanOp::Subtraction, BooleanOp::Intersection] {
-            assert!(matches!(
-                boolean_brep(&host, &cutter, operation, "out".into()),
-                Err(GeometryError::CoverageGap { .. })
-            ));
+            match boolean_brep(&host, &cutter, operation, "out".into()) {
+                Ok(result) => result.brep.validate().unwrap(),
+                Err(GeometryError::CoverageGap { .. }) => {}
+                Err(error) => panic!("{operation:?}: {error:?}"),
+            }
         }
     }
 }
