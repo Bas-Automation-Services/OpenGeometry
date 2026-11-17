@@ -176,7 +176,8 @@ pub(super) fn sew(
         slots.insert(members[1], (slot, other_sense));
     }
 
-    // Faces.
+    // Faces. Each halfedge's wanted (u, v) at its start, in creation order.
+    let mut wanted = Vec::new();
     for (k, region) in kept.iter().enumerate() {
         let surface_id = builder.brep().geometry.surfaces.len() as u32;
         let mut rings = Vec::new();
@@ -200,6 +201,7 @@ pub(super) fn sew(
                     builder.brep.geometry.intersections[d as usize].surfaces[region.side] =
                         surface_id;
                 }
+                wanted.push((piece.from, region.map.uv(piece.flat[0]), region.map));
                 uses.push(boundary(e.edge, vertices[a], vertices[b], sense, pcurve));
             }
             rings.push(uses);
@@ -217,7 +219,7 @@ pub(super) fn sew(
         builder.set_face_sense(face, region.sense)?;
         builder.brep.topology.faces[face as usize].provenance = region.provenance.clone();
     }
-    lift_intersection_uses(&mut builder, &kept)?;
+    lift_intersection_uses(&mut builder, &wanted)?;
     finish(builder, &kept, snap)
 }
 
@@ -286,15 +288,15 @@ fn pcurve(
     })
 }
 
-/// Intersection pcurves evaluate in their definition's own period; lift each use onto the face.
+/// Intersection pcurves evaluate in their definition's own period: each use lifted by whole
+/// periods onto where the face has it.
 fn lift_intersection_uses(
     builder: &mut Builder,
-    kept: &[Kept<'_, '_>],
+    wanted: &[(f64, crate::brep::UV, &FaceMap)],
 ) -> Result<(), GeometryError> {
     let brep = &mut builder.brep;
-    for h in 0..brep.topology.halfedges.len() {
-        let halfedge = &brep.topology.halfedges[h];
-        let (Some(face), Some(pcurve)) = (halfedge.face, halfedge.geometry_use.pcurve) else {
+    for (h, &(t, uv, map)) in wanted.iter().enumerate() {
+        let Some(pcurve) = brep.topology.halfedges[h].geometry_use.pcurve else {
             continue;
         };
         if !matches!(
@@ -303,14 +305,11 @@ fn lift_intersection_uses(
         ) {
             continue;
         }
-        let range = brep.topology.edges[halfedge.edge as usize].geometry.range();
-        let uv = brep.geometry.pcurve_at(pcurve, range.lo)?;
-        let bounds = brep.topology.faces[face as usize].trim.uv_bounds;
-        let map = kept[face as usize].map;
+        let have = brep.geometry.pcurve_at(pcurve, t)?;
         let mut lift = [0; 2];
         for axis in 0..2 {
             if let Some(period) = map.uv_period(axis) {
-                lift[axis] = ((bounds[axis].lo - uv[axis]) / period).ceil() as i32;
+                lift[axis] = ((uv[axis] - have[axis]) / period).round() as i32;
             }
         }
         brep.topology.halfedges[h].geometry_use.periodic_lift = lift;
@@ -324,6 +323,10 @@ fn finish(
     snap: f64,
 ) -> Result<BrepEnvelope, GeometryError> {
     let count = builder.brep.topology.faces.len();
+    builder
+        .brep
+        .orient_loops()
+        .map_err(|e| unresolved(format!("loops: {e}")))?;
     let mut assigned = vec![false; count];
     let mut outers: Vec<(u32, f64)> = Vec::new();
     let mut cavities = Vec::new();
@@ -351,7 +354,12 @@ fn finish(
             faces: faces.clone(),
             is_closed: true,
         });
-        match classify_point_in_shell(&builder.brep, &faces, probe)? {
+        let single = faces.len() == count;
+        match if single {
+            PointClassification::Outside
+        } else {
+            classify_point_in_shell(&builder.brep, &faces, probe)?
+        } {
             PointClassification::Inside => cavities.push(shell),
             PointClassification::Outside => outers.push((shell, shell_box(&builder.brep, &faces))),
             _ => return Err(unresolved("cannot tell a shell's inside from its outside")),
@@ -375,8 +383,17 @@ fn finish(
         )?;
         builder.brep.solids[index].cavity_shells.push(cavity);
     }
-    builder.brep.orient_loops()?;
-    builder.brep.validate()?;
+    // A result the kernel would not accept is a refusal, never an invalid body.
+    builder
+        .brep
+        .orient_loops()
+        .and_then(|()| builder.brep.validate())
+        .map_err(|error| match error {
+            GeometryError::InvalidTopology(m) | GeometryError::InvalidGeometry(m) => {
+                unresolved(format!("the sewn result is not valid: {m}"))
+            }
+            other => other,
+        })?;
     Ok(builder.brep)
 }
 
