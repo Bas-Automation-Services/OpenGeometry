@@ -1,10 +1,11 @@
 // A structural I-section (an arc-edged extrusion along z, with root radii) coped at one end:
 // a notch through its top flange, the notch tool an extrusion across the member along x.
 use super::support::volume_at_deflection;
-use crate::brep::{coarse_accuracy, BrepEnvelope, Frame3, GeometryError};
+use crate::brep::{coarse_accuracy, BrepEnvelope, Frame3};
 use crate::operations::modifying::boolean::dispatch::boolean_brep;
 use crate::operations::modifying::boolean::types::BooleanOp;
 use crate::primitives::{self, ProfileEdge};
+use crate::tessellation::measure;
 use std::f64::consts::{FRAC_PI_2, PI};
 
 // IPE300 in metres: depth, flange width, web and flange thickness, root radius; member length.
@@ -76,9 +77,19 @@ fn member(r: f64) -> BrepEnvelope {
 /// The notch tool in the member's (z, y) plane, run along −x through the whole width: open
 /// towards the z = L end and the top, its inner corner rounded by `corner` (0: square).
 fn notch(corner: f64) -> BrepEnvelope {
+    skewed_notch(corner, 0.0)
+}
+
+/// The notch tool run at `skew` radians off square across the member (a brace meeting at an angle).
+fn skewed_notch(corner: f64, skew: f64) -> BrepEnvelope {
     let (z, y, reach, half_width) = (L - NOTCH_LENGTH, NOTCH_FLOOR, 0.5, 0.2);
-    let frame =
-        Frame3::from_axis([half_width, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]).unwrap();
+    // The square tool turned about the y axis through the notch's back corner.
+    let (c, s) = (skew.cos(), skew.sin());
+    let turn = |p: [f64; 3]| [p[0] * c + p[2] * s, p[1], -p[0] * s + p[2] * c];
+    let pivot = [0.0, 0.0, z];
+    let arm = turn([half_width, 0.0, -z]);
+    let origin = [pivot[0] + arm[0], pivot[1] + arm[1], pivot[2] + arm[2]];
+    let frame = Frame3::from_axis(origin, turn([-1.0, 0.0, 0.0]), turn([0.0, 0.0, 1.0])).unwrap();
     let mut edges = vec![
         line([z + corner, y], [z + reach, y]),
         line([z + reach, y], [z + reach, y + reach]),
@@ -151,7 +162,6 @@ fn rounded_corner_kept() -> f64 {
 }
 
 #[test]
-#[ignore = "CoverageGap: no handler yet for an arc-edged extrusion minus an arc-edged extrusion across its axis"]
 fn a_rounded_notch_copes_an_i_section_exactly() {
     let result = boolean_brep(
         &member(R),
@@ -168,17 +178,43 @@ fn a_rounded_notch_copes_an_i_section_exactly() {
 }
 
 #[test]
-fn a_rounded_notch_is_a_coverage_gap_on_an_i_section_today() {
-    for r in [0.0, R] {
-        let result = boolean_brep(
-            &member(r),
-            &notch(CORNER),
-            BooleanOp::Subtraction,
-            "coped".into(),
-        );
-        assert!(
-            matches!(result, Err(GeometryError::CoverageGap { .. })),
-            "r = {r}"
-        );
-    }
+fn a_rounded_notch_copes_a_sharp_i_section_exactly() {
+    let result = boolean_brep(
+        &member(0.0),
+        &notch(CORNER),
+        BooleanOp::Subtraction,
+        "coped".into(),
+    )
+    .unwrap()
+    .brep;
+    assert_volume(
+        &result,
+        section_area(0.0) * L - area_above_floor(0.0) * NOTCH_LENGTH + rounded_corner_kept(),
+    );
+}
+
+#[test]
+fn a_skewed_rounded_notch_copes_an_i_section() {
+    let member = member(R);
+    let tool = skewed_notch(CORNER, 0.35);
+    let coped = boolean_brep(&member, &tool, BooleanOp::Subtraction, "coped".into())
+        .unwrap()
+        .brep;
+    let removed = boolean_brep(&member, &tool, BooleanOp::Intersection, "removed".into())
+        .unwrap()
+        .brep;
+    let whole = section_area(R) * L;
+    let (kept, cut) = (
+        measure(&coped, 1e-5).unwrap(),
+        measure(&removed, 1e-5).unwrap(),
+    );
+    let bound = kept.error_bound + cut.error_bound;
+    assert!(
+        (kept.volume + cut.volume - whole).abs() <= bound,
+        "{} + {} vs {whole} (bound {bound})",
+        kept.volume,
+        cut.volume
+    );
+    let (kept, cut) = (kept.volume, cut.volume);
+    assert!(cut > 0.0 && kept < whole);
 }
