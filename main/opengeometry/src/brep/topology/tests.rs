@@ -93,3 +93,15 @@ fn malformed_charts_and_undeclared_degenerate_edges_are_rejected() {
         matches!(b.validate(), Err(GeometryError::InvalidTopology(message)) if message.contains("edge endpoints"))
     );
 }
+
+#[test]
+fn edge_accessors_expose_curve_seam_and_faces() {
+    let brep = circular_face();
+    let (curve, range) = brep.edge_curve(0).expect("edge 0 has a curve");
+    assert!(matches!(curve, CurveGeometry::Circle { .. }));
+    assert!(range.hi > range.lo);
+    assert!(!brep.edge_is_seam(0));
+    assert_eq!(brep.edge_faces(0)[0], Some(0));
+    assert!(brep.edge_curve(999).is_none());
+    assert_eq!(brep.edge_faces(999), [None, None]);
+}
