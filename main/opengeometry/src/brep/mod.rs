@@ -18,7 +18,9 @@ mod validate;
 pub use accuracy::Accuracy;
 pub use body_type::BodyType;
 pub use bounds::PatchBounds;
-pub use builder::{boundary, plane_boundary, projected_boundary, uv_line, Builder, Use};
+pub use builder::{
+    boundary, plane_boundary, projected_boundary, uv_conic, uv_line, Builder, Use, UvCurve,
+};
 pub(super) use builder::{dimensions, padded_uv_bounds, WireUse};
 #[cfg(test)]
 pub(super) use builder::{wrapped_sector, SECTOR};
@@ -34,8 +36,7 @@ pub use geometry::{
     conoid_ellipse, CurveGeometry, GeometryStore, IntersectionPoint, Surface, SurfaceChart,
     SurfaceGeometry, SurfaceJet2, Wrap,
 };
-pub(super) use pcurve::period_lifted_uv;
-pub use pcurve::{IntersectionSide, PcurveGeometry};
+pub(super) use pcurve::{period_lifted_uv, IntersectionSide, PcurveGeometry};
 pub use placement::{mirror::mirrored, placed};
 pub use similarity::Similarity3;
 #[cfg(test)]
