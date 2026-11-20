@@ -1,8 +1,8 @@
 use super::entities::{bspline_curve, point, real, refs};
-use super::unit::Scale;
 use crate::brep::{BrepEnvelope, EdgeGeometry, GeometryError, Surface, SurfaceGeometry, UVBox};
 use crate::exchange::fit_bezier::{fit_curve, fit_surface, FittedSurface};
 use crate::exchange::part21::Part21Writer;
+use crate::exchange::unit::Scale;
 use crate::math::Interval;
 
 const MAX_PATCHES: usize = 1 << 16;

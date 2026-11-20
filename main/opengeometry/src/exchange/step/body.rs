@@ -1,7 +1,6 @@
 use super::entities::{
     bspline_curve, curve, pcurve, placement, point, real, refs, sense, PcurveOnSurface,
 };
-use super::unit::Scale;
 use super::wrapped::{add_fitted_surface, add_wrapped_curve};
 use crate::brep::{
     BrepEnvelope, CurveGeometry, Edge, EdgeGeometry, GeometryError, Orientation, PcurveGeometry,
@@ -9,6 +8,7 @@ use crate::brep::{
 };
 use crate::exchange::fit_curve::{fit_intersection_curve, FittedIntersectionCurve};
 use crate::exchange::part21::{sanitize_string_literal, Part21Writer};
+use crate::exchange::unit::Scale;
 
 pub(super) struct BodyEmission {
     pub(super) solids: Vec<usize>,
