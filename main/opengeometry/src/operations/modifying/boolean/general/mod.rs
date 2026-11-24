@@ -30,6 +30,7 @@ use super::assembly::analytic_face_mappings;
 use super::types::{BooleanOp, BooleanReport, BooleanResult};
 use crate::brep::{
     Accuracy, BrepEnvelope, FaceProvenance, FaceRole, FaceSource, GeometryError, GeometryQuality,
+    PatchBounds,
 };
 use crate::intersection::intersect_breps;
 use crate::math::dot;
@@ -102,6 +103,7 @@ pub(crate) fn general_boolean(
         }
     }
     let classifiers = [Classifier::new(a), Classifier::new(b)];
+    let boxes = [a.bounds_unchecked()?, b.bounds_unchecked()?];
     let mut kept = Vec::new();
     let mut keys: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for side in 0..2 {
@@ -118,7 +120,11 @@ pub(crate) fn general_boolean(
                 }
                 let inside =
                     inside_point(&rings).ok_or_else(|| gap("no point found inside a face"))?;
-                let place = classifiers[1 - side].classify(map.point(inside)?)?;
+                let place = if region.whole && apart(&rings, map, boxes[1 - side], snap)? {
+                    PointClassification::Outside
+                } else {
+                    classifiers[1 - side].classify(map.point(inside)?)?
+                };
                 let place = match place {
                     PointClassification::Boundary => {
                         let p = map.point(inside)?;
@@ -212,6 +218,25 @@ pub(crate) fn general_boolean(
             face_mappings,
         },
     })
+}
+
+/// Whether a face no cut crosses lies apart from a solid: a corner of it outside the solid's box.
+fn apart(
+    rings: &[Vec<Flat>],
+    map: &flat::FaceMap,
+    bounds: Option<PatchBounds>,
+    snap: f64,
+) -> Result<bool, GeometryError> {
+    let Some(bounds) = bounds else {
+        return Ok(true);
+    };
+    for p in rings.iter().flatten() {
+        let p = map.point(*p)?;
+        if (0..3).any(|i| p[i] < bounds.axes[i].lo - snap || p[i] > bounds.axes[i].hi + snap) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A ring narrower than the snap everywhere: its area no more than the snap times its length.

@@ -58,13 +58,39 @@ pub(super) fn clip_face_branch(
             FaceTrim::new(faces[1].0.brep, faces[1].1)?,
         ],
     };
+    let closed_form = !matches!(
+        geometry.curves[branch.curve as usize],
+        CurveGeometry::Intersection { .. }
+    );
+    let mut periods = [[None; 2]; 2];
+    for side in 0..2 {
+        periods[side] =
+            geometry.surface(side as u32)?.charts()[faces[side].1.trim.chart as usize].periods;
+    }
     let mut intervals: Vec<Interval> = Vec::new();
     for (segment, pair) in anchors.windows(2).enumerate() {
-        let subdivisions = 4;
-        for part in 0..subdivisions {
-            let lo = pair[0] + (pair[1] - pair[0]) * part as f64 / subdivisions as f64;
-            let hi = pair[0] + (pair[1] - pair[0]) * (part + 1) as f64 / subdivisions as f64;
-            let Some((start, end)) = clipped_span(&membership, bounds, segment, lo, hi)? else {
+        const SUBDIVISIONS: usize = 4;
+        // A closed-form piece whose box misses either face's bounds has no point on both faces.
+        if closed_form
+            && (0..2).any(|side| {
+                piece_box(geometry, branch.pcurves[side], pair[0], pair[1], accuracy.intersection)
+                    .is_ok_and(|piece| !box_may_overlap(periods[side], piece, bounds[side]))
+            })
+        {
+            continue;
+        }
+        // Each sample tested once: part ends are shared, middles are their own.
+        let at = |part: usize| pair[0] + (pair[1] - pair[0]) * part as f64 / SUBDIVISIONS as f64;
+        let mut ends = [false; SUBDIVISIONS + 1];
+        for (part, inside) in ends.iter_mut().enumerate() {
+            *inside = branch_inside_faces(&membership, at(part))?;
+        }
+        for part in 0..SUBDIVISIONS {
+            let (lo, hi) = (at(part), at(part + 1));
+            let middle = branch_inside_faces(&membership, 0.5 * (lo + hi))?;
+            let inside = [ends[part], middle, ends[part + 1]];
+            let Some((start, end)) = clipped_span(&membership, bounds, segment, lo, hi, inside)?
+            else {
                 continue;
             };
             if end - start <= accuracy.geometric {
@@ -88,14 +114,12 @@ fn clipped_span(
     segment: usize,
     lo: f64,
     hi: f64,
+    [lo_inside, middle_inside, hi_inside]: [bool; 3],
 ) -> Result<Option<(f64, f64)>, GeometryError> {
     let BranchMembership {
         geometry, branch, ..
     } = *membership;
     let middle = 0.5 * (lo + hi);
-    let lo_inside = branch_inside_faces(membership, lo)?;
-    let middle_inside = branch_inside_faces(membership, middle)?;
-    let hi_inside = branch_inside_faces(membership, hi)?;
     if !lo_inside && !middle_inside && !hi_inside {
         if matches!(
             geometry.curves[branch.curve as usize],
