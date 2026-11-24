@@ -3,7 +3,7 @@ use crate::brep::accuracy::Accuracy;
 use crate::brep::bounds::PatchBounds;
 use crate::brep::error::{missing, GeometryError};
 use crate::brep::frame::unit;
-use crate::brep::geometry::{Curve, GeometryStore, Surface, SurfaceGeometry};
+use crate::brep::geometry::{Curve, CurveGeometry, GeometryStore, Surface, SurfaceGeometry};
 use crate::math::{Interval, Point3};
 use serde::{Deserialize, Serialize};
 
@@ -72,6 +72,30 @@ impl BrepEnvelope {
     pub fn to_json(&self) -> Result<String, GeometryError> {
         self.validate()?;
         serde_json::to_string(self).map_err(|e| GeometryError::InvalidGeometry(e.to_string()))
+    }
+
+    /// The curve an edge runs along and its parameter range; `None` for a
+    /// collapsed edge or an unknown id.
+    pub fn edge_curve(&self, edge_id: u32) -> Option<(&CurveGeometry, Interval)> {
+        match self.topology.edges.get(edge_id as usize)?.geometry {
+            EdgeGeometry::Curve { curve, range } => Some((self.geometry.curves.get(curve as usize)?, range)),
+            EdgeGeometry::Collapsed { .. } => None,
+        }
+    }
+
+    /// True when the edge only closes a periodic surface's chart (the seam of
+    /// a full cylinder): not an edge of the shape.
+    pub fn edge_is_seam(&self, edge_id: u32) -> bool {
+        self.topology.edges.get(edge_id as usize).is_some_and(|e| e.chart_seam)
+    }
+
+    /// The faces on either side of an edge (`None` on a free side).
+    pub fn edge_faces(&self, edge_id: u32) -> [Option<u32>; 2] {
+        let Some(edge) = self.topology.edges.get(edge_id as usize) else {
+            return [None, None];
+        };
+        let face = |h: u32| self.topology.halfedges.get(h as usize).and_then(|h| h.face);
+        [face(edge.halfedge), edge.twin_halfedge.and_then(face)]
     }
 
     pub fn bounds(&self) -> Result<Option<PatchBounds>, GeometryError> {

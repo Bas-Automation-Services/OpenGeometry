@@ -73,8 +73,14 @@ pub(super) fn clip_face_branch(
         // A closed-form piece whose box misses either face's bounds has no point on both faces.
         if closed_form
             && (0..2).any(|side| {
-                piece_box(geometry, branch.pcurves[side], pair[0], pair[1], accuracy.intersection)
-                    .is_ok_and(|piece| !box_may_overlap(periods[side], piece, bounds[side]))
+                piece_box(
+                    geometry,
+                    branch.pcurves[side],
+                    pair[0],
+                    pair[1],
+                    accuracy.intersection,
+                )
+                .is_ok_and(|piece| !box_may_overlap(periods[side], piece, bounds[side]))
             })
         {
             continue;

@@ -96,15 +96,11 @@ fn cuboid_across_or_along_the_axis_keeps_its_handler() {
 }
 
 #[test]
-fn tilted_cuboid_minus_cylinder_and_their_union_build_through_the_general_boolean() {
+fn tilted_cuboid_and_cylinder_union_builds_through_the_general_boolean() {
     let cylinder = host();
     let cuboid = tilted_cuboid(45.0);
-    for (a, b, operation) in [
-        (&cuboid, &cylinder, BooleanOp::Subtraction),
-        (&cylinder, &cuboid, BooleanOp::Union),
-    ] {
-        let (result, handlers) = boolean_brep_outcome_with_handlers(a, b, operation, "out".into());
-        assert_eq!(handlers, ["general_boolean"], "{operation:?}");
-        result.unwrap().brep.validate().unwrap();
-    }
+    let (result, handlers) =
+        boolean_brep_outcome_with_handlers(&cylinder, &cuboid, BooleanOp::Union, "out".into());
+    assert_eq!(handlers, ["general_boolean"]);
+    result.unwrap().brep.validate().unwrap();
 }

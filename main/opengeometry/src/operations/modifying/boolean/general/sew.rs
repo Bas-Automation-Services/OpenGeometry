@@ -2,9 +2,8 @@ use super::arrangement::Use;
 use super::curve::{meeting, CurveRef};
 use super::flat::{FaceMap, Flat};
 use crate::brep::{
-    boundary, uv_line, Accuracy, BrepEnvelope, Builder, CurveGeometry, FaceProvenance,
-    GeometryError, IntersectionSide, Orientation, PcurveGeometry, Shell, SolidRegion,
-    SurfaceGeometry,
+    boundary, Accuracy, BrepEnvelope, Builder, CurveGeometry, FaceProvenance, GeometryError,
+    IntersectionSide, Orientation, PcurveGeometry, Shell, SolidRegion, SurfaceGeometry,
 };
 use crate::math::{add, dot, norm, scale, sub, Interval, Point3};
 use crate::operations::modifying::boolean::assembly::{assign_shell_faces, enclosing_solid};
@@ -244,10 +243,10 @@ fn pcurve(
         let local = |p: Point3| [dot(p, frame.x), dot(p, frame.y)];
         match geometry {
             CurveGeometry::Line { origin, direction } => {
-                return Ok(uv_line(
-                    local(sub(*origin, frame.origin)),
-                    local(*direction),
-                ))
+                return Ok(PcurveGeometry::Line2 {
+                    origin: local(sub(*origin, frame.origin)),
+                    direction: local(*direction),
+                })
             }
             CurveGeometry::Circle { frame: c, radius } => {
                 return Ok(PcurveGeometry::Conic2 {
