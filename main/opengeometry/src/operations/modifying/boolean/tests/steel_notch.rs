@@ -1,5 +1,3 @@
-// A structural I-section (an arc-edged extrusion along z, with root radii) coped at one end:
-// a notch through its top flange, the notch tool an extrusion across the member along x.
 use super::support::volume_at_deflection;
 use crate::brep::{coarse_accuracy, BrepEnvelope, Frame3};
 use crate::operations::modifying::boolean::dispatch::boolean_brep;
@@ -8,14 +6,12 @@ use crate::primitives::{self, ProfileEdge};
 use crate::tessellation::measure;
 use std::f64::consts::{FRAC_PI_2, PI};
 
-// IPE300 in metres: depth, flange width, web and flange thickness, root radius; member length.
 const H: f64 = 0.3;
 const B: f64 = 0.15;
 const TW: f64 = 0.0071;
 const TF: f64 = 0.0107;
 const R: f64 = 0.015;
 const L: f64 = 1.5;
-// Notch: back to the flange tip, its floor below the root radius, corner radius in the web.
 const NOTCH_LENGTH: f64 = 0.075;
 const NOTCH_FLOOR: f64 = 0.11;
 const CORNER: f64 = 0.01;
@@ -33,7 +29,6 @@ fn arc(center: [f64; 2], radius: f64, start_angle: f64, sweep_angle: f64) -> Pro
     }
 }
 
-/// The I-section, counter-clockwise; `r` = 0 gives sharp root corners.
 fn i_section(r: f64) -> Vec<ProfileEdge> {
     let (b, h, w, f) = (B / 2.0, H / 2.0, TW / 2.0, TF);
     let mut edges = vec![line([-b, -h], [b, -h]), line([b, -h], [b, -h + f])];
@@ -74,16 +69,12 @@ fn member(r: f64) -> BrepEnvelope {
     .unwrap()
 }
 
-/// The notch tool in the member's (z, y) plane, run along −x through the whole width: open
-/// towards the z = L end and the top, its inner corner rounded by `corner` (0: square).
 fn notch(corner: f64) -> BrepEnvelope {
     skewed_notch(corner, 0.0)
 }
 
-/// The notch tool run at `skew` radians off square across the member (a brace meeting at an angle).
 fn skewed_notch(corner: f64, skew: f64) -> BrepEnvelope {
     let (z, y, reach, half_width) = (L - NOTCH_LENGTH, NOTCH_FLOOR, 0.5, 0.2);
-    // The square tool turned about the y axis through the notch's back corner.
     let (c, s) = (skew.cos(), skew.sin());
     let turn = |p: [f64; 3]| [p[0] * c + p[2] * s, p[1], -p[0] * s + p[2] * c];
     let pivot = [0.0, 0.0, z];
@@ -113,7 +104,6 @@ fn section_area(r: f64) -> f64 {
     2.0 * B * TF + TW * (H - 2.0 * TF) + 4.0 * r * r * (1.0 - PI / 4.0)
 }
 
-/// Section area above the notch floor: the flange, its two root radii and the web below them.
 fn area_above_floor(r: f64) -> f64 {
     B * TF + 2.0 * r * r * (1.0 - PI / 4.0) + TW * (H / 2.0 - TF - NOTCH_FLOOR)
 }
@@ -155,8 +145,6 @@ fn a_square_notch_copes_a_sharp_i_section_exactly() {
     );
 }
 
-/// The rounded corner sits wholly in the web: it keeps a web-thick sliver of the corner square
-/// outside the quarter circle.
 fn rounded_corner_kept() -> f64 {
     TW * CORNER * CORNER * (1.0 - PI / 4.0)
 }

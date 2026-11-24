@@ -25,28 +25,7 @@ pub(super) fn clip_face_branch(
     bounds: [UVBox; 2],
     accuracy: Accuracy,
 ) -> Result<Vec<Interval>, GeometryError> {
-    let domain = branch.domain.ok_or_else(|| GeometryError::CoverageGap {
-        families: [
-            "bounded face trim".into(),
-            "unbounded intersection curve".into(),
-        ],
-    })?;
-    let mut anchors = match geometry.curves[branch.curve as usize] {
-        CurveGeometry::Intersection { definition } => geometry.intersections[definition as usize]
-            .anchors
-            .iter()
-            .map(|anchor| anchor.parameter)
-            .collect::<Vec<_>>(),
-        _ => (0..=256)
-            .map(|index| domain.lo + domain.width() * index as f64 / 256.0)
-            .collect(),
-    };
-    anchors.retain(|parameter| domain.contains(*parameter));
-    anchors.push(domain.lo);
-    anchors.push(domain.hi);
-    anchors.sort_by(f64::total_cmp);
-    anchors.dedup_by(|left, right| (*left - *right).abs() <= f64::EPSILON * 16.0);
-
+    let anchors = branch_anchors(geometry, branch)?;
     let membership = BranchMembership {
         geometry,
         branch,
@@ -70,7 +49,6 @@ pub(super) fn clip_face_branch(
     let mut intervals: Vec<Interval> = Vec::new();
     for (segment, pair) in anchors.windows(2).enumerate() {
         const SUBDIVISIONS: usize = 4;
-        // A closed-form piece whose box misses either face's bounds has no point on both faces.
         if closed_form
             && (0..2).any(|side| {
                 piece_box(
@@ -85,7 +63,6 @@ pub(super) fn clip_face_branch(
         {
             continue;
         }
-        // Each sample tested once: part ends are shared, middles are their own.
         let at = |part: usize| pair[0] + (pair[1] - pair[0]) * part as f64 / SUBDIVISIONS as f64;
         let mut ends = [false; SUBDIVISIONS + 1];
         for (part, inside) in ends.iter_mut().enumerate() {
@@ -112,6 +89,31 @@ pub(super) fn clip_face_branch(
         }
     }
     Ok(intervals)
+}
+
+fn branch_anchors(geometry: &GeometryStore, branch: &SsiCurve) -> Result<Vec<f64>, GeometryError> {
+    let domain = branch.domain.ok_or_else(|| GeometryError::CoverageGap {
+        families: [
+            "bounded face trim".into(),
+            "unbounded intersection curve".into(),
+        ],
+    })?;
+    let mut anchors = match geometry.curves[branch.curve as usize] {
+        CurveGeometry::Intersection { definition } => geometry.intersections[definition as usize]
+            .anchors
+            .iter()
+            .map(|anchor| anchor.parameter)
+            .collect::<Vec<_>>(),
+        _ => (0..=256)
+            .map(|index| domain.lo + domain.width() * index as f64 / 256.0)
+            .collect(),
+    };
+    anchors.retain(|parameter| domain.contains(*parameter));
+    anchors.push(domain.lo);
+    anchors.push(domain.hi);
+    anchors.sort_by(f64::total_cmp);
+    anchors.dedup_by(|left, right| (*left - *right).abs() <= f64::EPSILON * 16.0);
+    Ok(anchors)
 }
 
 fn clipped_span(

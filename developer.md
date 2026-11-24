@@ -30,6 +30,36 @@ or `uv_conic`) or `plane_boundary`, and passed to `face` or `face_with_holes`.
   point inward is accepted as built. To check one, take a point just off each face along
   `face_normal_at`; `query::classify_point` should call it `Outside`.
 
+## The general boolean
+
+`operations/modifying/boolean/general` is one boolean for analytic solids, by the classic
+pipeline rather than by operand family. It is the last attempt in `generic_boolean`: the
+family handlers go first, and a refusal of the general boolean reports the original
+coverage gap. Planes and cylinders, meeting in lines, circles and ellipses.
+
+1. `intersect_breps` intersects every face pair whose boxes meet: closed-form curves where
+   the surfaces have them, traced intersection curves where not, each clipped to where it
+   lies on both faces.
+2. `pieces`: each piece cuts the face it runs across, and its ends split the edges they lie
+   on. A cut over a cylinder's seam is split there on every face it crosses, and so is the
+   seam.
+3. `flat` unrolls a face into flat (u, v): u scaled by the radius on a cylinder so lengths are
+   lengths, and on a periodic axis a window one period wide holding the whole face.
+   `arrangement` traces the face's regions there, loops with the face on their left (at every
+   node the first use clockwise from the way back), outer loops and the holes inside them.
+4. `mod.rs` locates each region against the other solid at a point well inside it. A region
+   no cut crosses with a corner outside the other solid's box is outside without a probe.
+5. `sew` builds the regions the operation keeps (the second solid's reversed in a
+   subtraction) into one body by their edges' geometry: vertices where the curves through
+   them meet, one edge per pair of uses with the same ends and middle, intersection pcurves
+   lifted by whole periods to where each face has them. A result that fails `validate()` is
+   an `UnresolvedIntersection`, never an invalid body.
+
+Faces of both solids on one surface (`imprint`) cut each other where their edges lie on the
+other face; a region on the other solid's boundary is kept by whether the two faces point the
+same way (a union keeps the first solid's, a subtraction the opposite-facing). A region
+narrower than the snap (100 x the geometric accuracy) is refused.
+
 ## Local build
 
 ```bash

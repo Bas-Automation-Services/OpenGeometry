@@ -1,12 +1,11 @@
+use super::curve::CurveRef;
 use super::flat::{signed_area, winding, Flat};
 use crate::brep::GeometryError;
 use std::f64::consts::TAU;
 
-/// One use of a curve piece by a loop being built, run from `from` to `to`, with its flat
-/// polyline in that direction.
 #[derive(Clone)]
 pub(super) struct Use<'a> {
-    pub(super) curve: super::curve::CurveRef<'a>,
+    pub(super) curve: CurveRef<'a>,
     pub(super) from: f64,
     pub(super) to: f64,
     pub(super) flat: Vec<Flat>,
@@ -35,7 +34,6 @@ pub(super) fn reversed_loop<'a>(uses: &[Use<'a>]) -> Vec<Use<'a>> {
     uses.iter().rev().map(Use::reversed).collect()
 }
 
-/// The ring a loop's polylines make, each use's end left out (it is the next one's start).
 pub(super) fn ring(uses: &[Use<'_>]) -> Vec<Flat> {
     uses.iter()
         .flat_map(|u| u.flat[..u.flat.len() - 1].iter().copied())
@@ -46,9 +44,6 @@ fn unresolved(message: &str) -> GeometryError {
     GeometryError::UnresolvedIntersection(format!("general boolean: {message}"))
 }
 
-/// The faces a set of uses bound in flat, each an outer loop and its holes, all with the face on
-/// their left. At every node the next use is the first one clockwise from the way back. Every
-/// node needs as many uses leaving it as arriving.
 pub(super) fn faces<'a>(
     uses: Vec<Use<'a>>,
     snap: f64,
@@ -126,7 +121,6 @@ pub(super) fn faces<'a>(
         .collect())
 }
 
-/// The direction a polyline leaves its start, or at its end the way back along it.
 fn direction(flat: &[Flat], at_end: bool) -> f64 {
     let (a, b) = if at_end {
         (flat[flat.len() - 1], flat[flat.len() - 2])
@@ -136,7 +130,6 @@ fn direction(flat: &[Flat], at_end: bool) -> f64 {
     (b[1] - a[1]).atan2(b[0] - a[0])
 }
 
-/// A point `distance` to the left of a polyline's middle chord.
 fn left_of(flat: &[Flat], distance: f64) -> Flat {
     let i = (flat.len() - 1) / 2;
     let (a, b) = (flat[i], flat[i + 1]);

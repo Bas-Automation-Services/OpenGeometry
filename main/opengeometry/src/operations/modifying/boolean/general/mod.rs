@@ -1,24 +1,3 @@
-//! One boolean for analytic solids, by the classic pipeline rather than by operand family.
-//!
-//! The stages, and what each takes from the kernel:
-//!
-//! 1. Intersect every face of one solid with every face of the other whose boxes meet
-//!    (`intersect_breps`): closed-form curves where the surfaces have them (lines, circles,
-//!    ellipses), traced intersection curves where not, each clipped to where it lies on both faces.
-//! 2. Each such piece cuts the face it runs across, and its ends split the edges they lie on
-//!    (`pieces`). A cut that runs over a cylinder's seam is split there, and so is the seam.
-//! 3. Each face is cut along its cuts in its own flat (u, v) (`arrangement`): loops traced so the
-//!    face stays on their left, at every node the first use clockwise from the way back; loops
-//!    sorted into outer boundaries and the holes inside them.
-//! 4. Each region is located against the other solid at a point well inside it (`Classifier`),
-//!    and the regions the operation keeps (those of the second solid reversed in a subtraction)
-//!    are sewn into one B-rep by their edges' geometry (`sew`): vertices where the curves through
-//!    them meet, shells by adjacency, voids into the solid round them.
-//!
-//! Faces on one surface (coincident) imprint each other's edges where they lie on the other
-//! (`imprint`); a region on the other solid's boundary is kept by whether the two faces point the
-//! same way.
-
 mod arrangement;
 mod curve;
 mod flat;
@@ -32,17 +11,17 @@ use crate::brep::{
     Accuracy, BrepEnvelope, FaceProvenance, FaceRole, FaceSource, GeometryError, GeometryQuality,
     PatchBounds,
 };
-use crate::intersection::intersect_breps;
+use crate::intersection::{intersect_breps, BodyIntersectionGraph};
 use crate::math::dot;
 use crate::query::{Classifier, PointClassification};
 use arrangement::{reversed_loop, ring};
 use curve::CurveRef;
-use flat::{inside_point, signed_area, Flat};
+use flat::{inside_point, signed_area, FaceMap, Flat};
 use imprint::imprint;
-use pieces::{Cut, Operand};
+use pieces::{Cut, Operand, Region};
 use sew::{sew, Kept};
+use std::collections::HashMap;
 
-/// Where a region lies against the other solid; on its boundary, facing the same way or not.
 #[derive(Clone, Copy)]
 enum Located {
     Out,
@@ -57,6 +36,10 @@ fn gap(message: &str) -> GeometryError {
     }
 }
 
+fn unresolved(message: &str) -> GeometryError {
+    GeometryError::UnresolvedIntersection(format!("general boolean: {message}"))
+}
+
 pub(crate) fn general_boolean(
     a: &BrepEnvelope,
     b: &BrepEnvelope,
@@ -67,12 +50,39 @@ pub(crate) fn general_boolean(
     let snap = 100.0 * accuracy.geometric;
     let graph = intersect_breps(a, b)?;
     let mut operands = [Operand::new(a, snap)?, Operand::new(b, snap)?];
-    let mut contacts = Vec::new();
+    cut(&mut operands, &graph)?;
+    let kept = keep(&operands, operation, snap)?;
+    let mut brep = if kept.is_empty() {
+        BrepEnvelope::new(id, accuracy)?
+    } else {
+        sew(kept, id, accuracy, snap)?
+    };
+    brep.revision = a.revision.max(b.revision).saturating_add(1);
+    let face_mappings = analytic_face_mappings(&brep, [a, b]);
+    Ok(BooleanResult {
+        brep,
+        report: BooleanReport {
+            operation,
+            quality: GeometryQuality::Analytic,
+            contacts: graph
+                .pairs
+                .iter()
+                .flat_map(|pair| pair.graph.contacts.iter().copied())
+                .collect(),
+            coincident: false,
+            face_mappings,
+        },
+    })
+}
+
+fn cut<'a>(
+    operands: &mut [Operand<'a>; 2],
+    graph: &'a BodyIntersectionGraph,
+) -> Result<(), GeometryError> {
     for pair in &graph.pairs {
         if pair.graph.coincident {
-            imprint(&mut operands, pair.faces)?;
+            imprint(operands, pair.faces)?;
         }
-        contacts.extend(pair.graph.contacts.iter().copied());
         for branch in &pair.graph.branches {
             let curve = CurveRef {
                 store: &pair.graph.geometry,
@@ -91,139 +101,159 @@ pub(crate) fn general_boolean(
             }
         }
     }
-    let mut crossings = std::collections::HashMap::new();
-    for operand in &mut operands {
+    let mut crossings = HashMap::new();
+    for operand in operands.iter_mut() {
         for face in 0..operand.brep.topology.faces.len() as u32 {
             operand.seam_crossings(face, &mut crossings)?;
         }
     }
-    for operand in &mut operands {
+    for operand in operands.iter_mut() {
         for face in 0..operand.brep.topology.faces.len() as u32 {
             operand.trace_cuts(face, &crossings)?;
         }
     }
-    let classifiers = [Classifier::new(a), Classifier::new(b)];
-    let boxes = [a.bounds_unchecked()?, b.bounds_unchecked()?];
+    Ok(())
+}
+
+fn keep<'k, 'a>(
+    operands: &'k [Operand<'a>; 2],
+    operation: BooleanOp,
+    snap: f64,
+) -> Result<Vec<Kept<'k, 'a>>, GeometryError> {
+    let classifiers = [
+        Classifier::new(operands[0].brep),
+        Classifier::new(operands[1].brep),
+    ];
+    let boxes = [
+        operands[0].brep.bounds_unchecked()?,
+        operands[1].brep.bounds_unchecked()?,
+    ];
     let mut kept = Vec::new();
-    let mut keys: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for side in 0..2 {
-        let operand = &operands[side];
+    let mut keys = HashMap::new();
+    for (side, operand) in operands.iter().enumerate() {
         for face in 0..operand.brep.topology.faces.len() as u32 {
             for region in operand.regions(face)? {
                 let map = &operand.maps[face as usize];
                 let rings: Vec<Vec<Flat>> = region.loops.iter().map(|l| ring(l)).collect();
                 if rings.iter().any(|r| sliver(r, snap)) {
-                    return Err(GeometryError::UnresolvedIntersection(
-                        "general boolean: a face piece is a sliver below geometric resolution"
-                            .into(),
+                    return Err(unresolved(
+                        "a face piece is a sliver below geometric resolution",
                     ));
                 }
                 let inside =
                     inside_point(&rings).ok_or_else(|| gap("no point found inside a face"))?;
                 let place = if region.whole && apart(&rings, map, boxes[1 - side], snap)? {
-                    PointClassification::Outside
+                    Located::Out
                 } else {
-                    classifiers[1 - side].classify(map.point(inside)?)?
+                    locate(&operands[1 - side], &classifiers[1 - side], map, inside)?
                 };
-                let place = match place {
-                    PointClassification::Boundary => {
-                        let p = map.point(inside)?;
-                        let other = operands[1 - side]
-                            .normal_at(p)?
-                            .ok_or_else(|| gap("a face on the other solid's boundary"))?;
-                        if dot(other, map.normal(inside)?) > 0.0 {
-                            Located::OnSame
-                        } else {
-                            Located::OnOpposite
-                        }
-                    }
-                    PointClassification::Inside => Located::In,
-                    PointClassification::Outside => Located::Out,
-                    PointClassification::Unknown => {
-                        return Err(GeometryError::UnresolvedIntersection(
-                            "general boolean: a face cannot be located against the other solid"
-                                .into(),
-                        ))
-                    }
+                let Some(flip) = flipped(operation, side, place) else {
+                    continue;
                 };
-                let flip = match (operation, side, place) {
-                    (BooleanOp::Union, 0, Located::Out | Located::OnSame)
-                    | (BooleanOp::Union, 1, Located::Out)
-                    | (BooleanOp::Intersection, 0, Located::In | Located::OnSame)
-                    | (BooleanOp::Intersection, 1, Located::In)
-                    | (BooleanOp::Subtraction, 0, Located::Out | Located::OnOpposite) => false,
-                    (BooleanOp::Subtraction, 1, Located::In) => true,
-                    _ => continue,
-                };
-                let source = operand.brep.topology.faces[face as usize].clone();
-                let role = if flip {
-                    FaceRole::Cut
-                } else if region.whole {
-                    FaceRole::Preserved
-                } else {
-                    FaceRole::Split
-                };
-                kept.push(Kept {
-                    map,
-                    loops: if flip {
-                        region.loops.iter().map(|l| reversed_loop(l)).collect()
-                    } else {
-                        region.loops
-                    },
-                    sense: if flip {
-                        map.sense.reversed()
-                    } else {
-                        map.sense
-                    },
-                    key: {
-                        let base = format!("{}:{}", operand.brep.id, source.key);
-                        let count = keys.entry(base.clone()).or_insert(0);
-                        *count += 1;
-                        if *count == 1 {
-                            base
-                        } else {
-                            format!("{base}-{count}")
-                        }
-                    },
-                    provenance: FaceProvenance {
-                        sources: vec![FaceSource {
-                            entity: operand.brep.id.clone(),
-                            body: operand.brep.id.clone(),
-                            key: source.key,
-                            face,
-                        }],
-                        role,
-                        reversed: flip,
-                    },
-                    side,
-                    inside,
-                });
+                kept.push(kept_region(operand, side, region, flip, inside, &mut keys));
             }
         }
     }
-    let mut brep = if kept.is_empty() {
-        BrepEnvelope::new(id, accuracy)?
-    } else {
-        sew(kept, id, accuracy, snap)?
-    };
-    brep.revision = a.revision.max(b.revision).saturating_add(1);
-    let face_mappings = analytic_face_mappings(&brep, [a, b]);
-    Ok(BooleanResult {
-        brep,
-        report: BooleanReport {
-            operation,
-            quality: GeometryQuality::Analytic,
-            contacts,
-            coincident: false,
-            face_mappings,
-        },
+    Ok(kept)
+}
+
+fn locate(
+    other: &Operand<'_>,
+    classifier: &Classifier<'_>,
+    map: &FaceMap,
+    inside: Flat,
+) -> Result<Located, GeometryError> {
+    let p = map.point(inside)?;
+    Ok(match classifier.classify(p)? {
+        PointClassification::Boundary => {
+            let normal = other
+                .normal_at(p)?
+                .ok_or_else(|| gap("a face on the other solid's boundary"))?;
+            if dot(normal, map.normal(inside)?) > 0.0 {
+                Located::OnSame
+            } else {
+                Located::OnOpposite
+            }
+        }
+        PointClassification::Inside => Located::In,
+        PointClassification::Outside => Located::Out,
+        PointClassification::Unknown => {
+            return Err(unresolved(
+                "a face cannot be located against the other solid",
+            ))
+        }
     })
 }
 
-/// Whether a face no cut crosses lies apart from a solid: a corner of it outside the solid's box.
+fn flipped(operation: BooleanOp, side: usize, place: Located) -> Option<bool> {
+    match (operation, side, place) {
+        (BooleanOp::Union, 0, Located::Out | Located::OnSame)
+        | (BooleanOp::Union, 1, Located::Out)
+        | (BooleanOp::Intersection, 0, Located::In | Located::OnSame)
+        | (BooleanOp::Intersection, 1, Located::In)
+        | (BooleanOp::Subtraction, 0, Located::Out | Located::OnOpposite) => Some(false),
+        (BooleanOp::Subtraction, 1, Located::In) => Some(true),
+        _ => None,
+    }
+}
+
+fn kept_region<'k, 'a>(
+    operand: &'k Operand<'a>,
+    side: usize,
+    region: Region<'a>,
+    flip: bool,
+    inside: Flat,
+    keys: &mut HashMap<String, usize>,
+) -> Kept<'k, 'a> {
+    let face = region.face;
+    let map = &operand.maps[face as usize];
+    let source = &operand.brep.topology.faces[face as usize];
+    let role = if flip {
+        FaceRole::Cut
+    } else if region.whole {
+        FaceRole::Preserved
+    } else {
+        FaceRole::Split
+    };
+    let base = format!("{}:{}", operand.brep.id, source.key);
+    let count = keys.entry(base.clone()).or_insert(0);
+    *count += 1;
+    let key = if *count == 1 {
+        base
+    } else {
+        format!("{base}-{count}")
+    };
+    Kept {
+        map,
+        loops: if flip {
+            region.loops.iter().map(|l| reversed_loop(l)).collect()
+        } else {
+            region.loops
+        },
+        sense: if flip {
+            map.sense.reversed()
+        } else {
+            map.sense
+        },
+        key,
+        provenance: FaceProvenance {
+            sources: vec![FaceSource {
+                entity: operand.brep.id.clone(),
+                body: operand.brep.id.clone(),
+                key: source.key.clone(),
+                face,
+            }],
+            role,
+            reversed: flip,
+        },
+        side,
+        inside,
+    }
+}
+
 fn apart(
     rings: &[Vec<Flat>],
-    map: &flat::FaceMap,
+    map: &FaceMap,
     bounds: Option<PatchBounds>,
     snap: f64,
 ) -> Result<bool, GeometryError> {
@@ -239,7 +269,6 @@ fn apart(
     Ok(false)
 }
 
-/// A ring narrower than the snap everywhere: its area no more than the snap times its length.
 fn sliver(ring: &[Flat], snap: f64) -> bool {
     let length: f64 = (0..ring.len())
         .map(|i| {

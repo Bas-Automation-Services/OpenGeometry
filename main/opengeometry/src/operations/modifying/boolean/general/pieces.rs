@@ -1,20 +1,24 @@
 use super::arrangement::{faces, reversed_loop, Use};
 use super::curve::CurveRef;
 use super::flat::{distance_to_polyline, halfedge_flat, winding, FaceMap, Flat};
-use super::imprint::Place;
 use crate::brep::{BrepEnvelope, EdgeGeometry, GeometryError, Orientation, Surface};
 use crate::math::{norm, sub, Point3};
 use std::collections::HashMap;
 use std::f64::consts::TAU;
 
-/// A curve told apart from others by the store it lives in and its index there.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Place {
+    Outside,
+    Boundary,
+    Inside,
+}
+
 pub(super) type CurveKey = (usize, u32);
 
 pub(super) fn curve_key(curve: CurveRef<'_>) -> CurveKey {
     (curve.store as *const _ as usize, curve.id)
 }
 
-/// A piece of a face-pair intersection curve that runs across a face.
 #[derive(Clone, Copy)]
 pub(super) struct Cut<'a> {
     pub(super) curve: CurveRef<'a>,
@@ -22,7 +26,6 @@ pub(super) struct Cut<'a> {
     pub(super) hi: f64,
 }
 
-/// One solid of a boolean: its faces unrolled, where its edges split and the cuts on its faces.
 pub(super) struct Operand<'a> {
     pub(super) brep: &'a BrepEnvelope,
     pub(super) maps: Vec<FaceMap>,
@@ -33,8 +36,6 @@ pub(super) struct Operand<'a> {
     snap: f64,
 }
 
-/// A region of a face after the cuts: loops of uses with the face on their left seen from
-/// outside the solid, and whether the face came through whole.
 pub(super) struct Region<'a> {
     pub(super) face: u32,
     pub(super) loops: Vec<Vec<Use<'a>>>,
@@ -85,7 +86,6 @@ impl<'a> Operand<'a> {
         Ok(operand)
     }
 
-    /// The halfedges of each loop of a face, the outer loop first.
     fn face_loops(&self, face: u32) -> Vec<Vec<u32>> {
         let f = &self.brep.topology.faces[face as usize];
         std::iter::once(f.trim.outer)
@@ -113,7 +113,6 @@ impl<'a> Operand<'a> {
         }
     }
 
-    /// Whether a point on a face's surface lies on the face's boundary.
     pub(super) fn on_boundary(&self, face: u32, p: Point3) -> Result<bool, GeometryError> {
         let flat = self.flat_of(face, p)?;
         Ok(self.rings[face as usize].iter().any(|ring| {
@@ -140,7 +139,6 @@ impl<'a> Operand<'a> {
         self.cuts[face as usize].push(cut);
     }
 
-    /// Splits whichever edge of the face the point lies on, unless at one of its ends.
     pub(super) fn split_at(&mut self, face: u32, p: Point3) -> Result<(), GeometryError> {
         for halfedges in self.face_loops(face) {
             for h in halfedges {
@@ -150,7 +148,6 @@ impl<'a> Operand<'a> {
         Ok(())
     }
 
-    /// Splits the edge at the point when it lies on it, away from its ends.
     pub(super) fn split_edge_at(&mut self, edge: u32, p: Point3) -> Result<(), GeometryError> {
         let range = self.brep.topology.edges[edge as usize].geometry.range();
         let curve = self.edge_curve(edge)?;
@@ -181,7 +178,6 @@ impl<'a> Operand<'a> {
         self.snap
     }
 
-    /// The face's edges, each once, with their curves and ranges.
     pub(super) fn face_edges(
         &self,
         face: u32,
@@ -200,7 +196,6 @@ impl<'a> Operand<'a> {
         Ok(result)
     }
 
-    /// An edge of the face in its flat, in the edge's own direction, with the sample parameters.
     pub(super) fn edge_flat(
         &self,
         face: u32,
@@ -218,7 +213,6 @@ impl<'a> Operand<'a> {
         Ok((stations, flat))
     }
 
-    /// Where a point on the face's surface lies against the face.
     pub(super) fn locate(&self, face: u32, p: Point3) -> Result<Place, GeometryError> {
         let flat = self.flat_of(face, p)?;
         let rings = &self.rings[face as usize];
@@ -236,7 +230,6 @@ impl<'a> Operand<'a> {
         })
     }
 
-    /// The outward normal of the face of this solid a point lies on, when it lies on one.
     pub(super) fn normal_at(&self, p: Point3) -> Result<Option<Point3>, GeometryError> {
         for face in 0..self.maps.len() {
             let map = &self.maps[face];
@@ -253,8 +246,6 @@ impl<'a> Operand<'a> {
         Ok(None)
     }
 
-    /// Where the face's cuts run across its seams: the seam edges split there, and the cut curves'
-    /// parameters recorded, so the cut splits there on every face it runs across.
     pub(super) fn seam_crossings(
         &mut self,
         face: u32,
@@ -281,7 +272,6 @@ impl<'a> Operand<'a> {
         Ok(())
     }
 
-    /// A traced piece moved, when it starts on a seam, to the side it runs into.
     fn windowed_trace(
         &self,
         face: u32,
@@ -305,7 +295,6 @@ impl<'a> Operand<'a> {
         Ok((stations, flat))
     }
 
-    /// Traces every cut of the face into flat pieces, split where any face's seam splits it.
     pub(super) fn trace_cuts(
         &mut self,
         face: u32,
@@ -358,7 +347,6 @@ impl<'a> Operand<'a> {
         Ok(())
     }
 
-    /// The face cut into regions, or as it is when nothing cut or split it.
     pub(super) fn regions(&self, face: u32) -> Result<Vec<Region<'a>>, GeometryError> {
         let topology = &self.brep.topology;
         let mut uses = Vec::new();
@@ -429,7 +417,6 @@ impl<'a> Operand<'a> {
     }
 }
 
-/// The parameter where a traced piece crosses the window's edge between samples `i` and `i + 1`.
 fn crossing(
     map: &FaceMap,
     curve: CurveRef<'_>,

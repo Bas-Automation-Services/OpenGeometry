@@ -1,20 +1,9 @@
 use super::curve::{meeting, CurveRef};
 use super::flat::Flat;
-use super::pieces::{Cut, Operand};
+use super::pieces::{Cut, Operand, Place};
 use crate::brep::GeometryError;
 use crate::math::{norm, sub, Point3};
 
-/// Where a point lies against a face.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Place {
-    Outside,
-    Boundary,
-    Inside,
-}
-
-/// Two faces on one surface: each face's edges where they lie on the other face. Pieces inside
-/// the other face cut it; every piece on it splits the edges at its ends, and the edges of both
-/// split where they cross.
 pub(super) fn imprint(
     operands: &mut [Operand<'_>; 2],
     faces: [u32; 2],
@@ -58,9 +47,6 @@ pub(super) fn imprint(
     Ok(())
 }
 
-/// Points where an edge of one face crosses or touches the boundary of the other, both on their
-/// common surface: polyline crossings in the other face's flat, refined onto both curves; and
-/// either curve's ends lying on the other.
 fn crossings(
     operands: &[Operand<'_>; 2],
     from: usize,
@@ -105,7 +91,6 @@ fn crossings(
     Ok(unique)
 }
 
-/// Where segments a-b and c-d cross: the fractions along each.
 fn segment_crossing(a: Flat, b: Flat, c: Flat, d: Flat) -> Option<(f64, f64)> {
     let r = [b[0] - a[0], b[1] - a[1]];
     let s = [d[0] - c[0], d[1] - c[1]];

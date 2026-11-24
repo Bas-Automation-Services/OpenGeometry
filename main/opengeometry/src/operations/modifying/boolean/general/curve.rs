@@ -2,7 +2,6 @@ use crate::brep::{Curve, CurveGeometry, GeometryError, GeometryStore};
 use crate::math::{add, dot, norm, scale, sub, Point3};
 use std::f64::consts::TAU;
 
-/// A curve of an operand or of a face-pair intersection, with the store that evaluates it.
 #[derive(Clone, Copy)]
 pub(super) struct CurveRef<'a> {
     pub(super) store: &'a GeometryStore,
@@ -26,8 +25,6 @@ impl CurveRef<'_> {
         )
     }
 
-    /// Parameters from `lo` to `hi` dense enough that chords stay within a few hundredths of a
-    /// radian of the curve: two for a line.
     pub(super) fn stations(&self, lo: f64, hi: f64) -> Vec<f64> {
         let count = match self.geometry() {
             CurveGeometry::Line { .. } => 1,
@@ -41,7 +38,6 @@ impl CurveRef<'_> {
             .collect()
     }
 
-    /// The parameter of the point of the curve nearest `p`, starting the search at `near`.
     pub(super) fn parameter(&self, p: Point3, near: f64) -> Result<f64, GeometryError> {
         let mut t = match *self.geometry() {
             CurveGeometry::Line { origin, direction } => return Ok(dot(sub(p, origin), direction)),
@@ -78,8 +74,6 @@ impl CurveRef<'_> {
     }
 }
 
-/// The point where curves that pass near `p` meet: each curve's nearest point averaged until it
-/// settles. Exact where they cross; their common point within float noise.
 pub(super) fn meeting(curves: &[(CurveRef<'_>, f64)], p: Point3) -> Result<Point3, GeometryError> {
     if curves.len() < 2 {
         return Ok(p);

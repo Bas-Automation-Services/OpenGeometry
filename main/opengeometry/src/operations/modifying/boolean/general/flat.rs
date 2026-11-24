@@ -4,9 +4,6 @@ use crate::math::Point3;
 
 pub(super) type Flat = [f64; 2];
 
-/// A face's surface unrolled into flat (u, v): u scaled by the radius on a cylinder so lengths
-/// are lengths, and on a periodic axis a window one period wide holding the whole face, so every
-/// point of the face has one flat position. Loops run with the face on their left in flat.
 pub(super) struct FaceMap {
     pub(super) surface: SurfaceGeometry,
     pub(super) sense: Orientation,
@@ -33,7 +30,6 @@ impl FaceMap {
         })
     }
 
-    /// Starts the window where the face's own loops reach lowest (flat points).
     pub(super) fn fit_window(&mut self, loops: &[Vec<Flat>]) {
         for axis in 0..2 {
             let low = loops
@@ -64,13 +60,11 @@ impl FaceMap {
     pub(super) fn point(&self, flat: Flat) -> Result<Point3, GeometryError> {
         self.surface.point_at(self.uv(flat))
     }
-    /// The outward normal of the solid at a flat point.
     pub(super) fn normal(&self, flat: Flat) -> Result<Point3, GeometryError> {
         let n = self.surface.normal_at(self.uv(flat))?;
         Ok(n.map(|x| x * self.sense.multiplier()))
     }
 
-    /// `uv` moved by whole periods into the window, a little below its start counting as inside.
     fn windowed(&self, mut uv: UV, slack: f64) -> UV {
         for axis in 0..2 {
             if let Some(period) = self.periods[axis] {
@@ -81,9 +75,6 @@ impl FaceMap {
         uv
     }
 
-    /// A curve piece from `from` to `to` in flat, sampled densely, continuous, starting in the
-    /// window, and the parameters of its samples. It may run out of the window across a seam;
-    /// `split_at_window` cuts it there.
     pub(super) fn trace(
         &self,
         curve: CurveRef<'_>,
@@ -107,7 +98,6 @@ impl FaceMap {
         ))
     }
 
-    /// Where a traced piece leaves the window: the sample index it crosses after and the side.
     pub(super) fn exit(&self, flat: &[Flat]) -> Option<(usize, usize, f64)> {
         for axis in 0..2 {
             let Some(period) = self.periods[axis] else {
@@ -130,7 +120,6 @@ impl FaceMap {
     }
 }
 
-/// Flat polyline of a face's own halfedge, from its pcurve and periodic lift, in loop direction.
 pub(super) fn halfedge_flat(
     brep: &BrepEnvelope,
     map: &FaceMap,
@@ -174,7 +163,6 @@ fn segment_distance(p: Flat, a: Flat, b: Flat) -> f64 {
     q[0].hypot(q[1])
 }
 
-/// Winding number of closed polylines (each a loop's samples, end to start implied) round `p`.
 pub(super) fn winding(p: Flat, loops: &[Vec<Flat>]) -> i32 {
     let mut count = 0;
     for ring in loops {
@@ -206,8 +194,6 @@ pub(super) fn signed_area(ring: &[Flat]) -> f64 {
         / 2.0
 }
 
-/// A point well inside a region given by its rings: on a few lines across it, the middle of the
-/// widest stretches inside, keeping the one farthest from every ring.
 pub(super) fn inside_point(rings: &[Vec<Flat>]) -> Option<Flat> {
     let ys = rings.iter().flatten().map(|p| p[1]);
     let (low, high) = ys.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), y| {

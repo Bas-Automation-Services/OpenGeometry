@@ -27,7 +27,6 @@ fn arc(center: [f64; 2], start_angle: f64, sweep_angle: f64) -> ProfileEdge {
     }
 }
 
-/// An IPE300-like section (root radii, no toe radii), counter-clockwise.
 pub(super) fn ipe_outline() -> Vec<ProfileEdge> {
     let (y0, y1) = (-H + TF, H - TF);
     vec![
@@ -59,7 +58,6 @@ pub(super) fn ipe(id: &str, length: f64) -> BrepEnvelope {
         .unwrap()
 }
 
-/// A cuboid filling dot(p - origin, normal) in [0, reach] around `origin`: a half-space clipper.
 pub(super) fn half_space(id: &str, origin: Point3, normal: Point3, reach: f64) -> BrepEnvelope {
     let helper = if normal[0].abs() < 0.9 {
         [1.0, 0.0, 0.0]
@@ -81,7 +79,6 @@ pub(super) fn half_space(id: &str, origin: Point3, normal: Point3, reach: f64) -
     .unwrap()
 }
 
-/// The body's volume, checked against `exact` within the measure's own error bound.
 fn assert_volume(body: &BrepEnvelope, exact: f64) {
     body.validate().unwrap();
     let m = measure(body, 1e-5).unwrap();
@@ -126,11 +123,9 @@ fn an_ipe_cut_at_a_skew_angle() {
     let n = [0.3, 0.4, (1.0f64 - 0.25).sqrt()];
     let member = ipe("member", 1.0);
     let cutter = half_space("cutter", [0.0, 0.0, 0.7], n, 2.0);
-    // Keeps dot(p, n) <= 0.7 n_z: z <= 0.7 - (0.3 x + 0.4 y) / n_z, and the section is symmetric.
     assert_volume(&cut(&member, &cutter), 0.7 * ipe_area());
 }
 
-/// A square hollow section 0.1 wide, 0.005 wall, outer corner radius 0.0075, inner 0.0025.
 fn shs_loop(half: f64, radius: f64) -> Vec<ProfileEdge> {
     let k = half - radius;
     let corner = |c: [f64; 2], start: f64| ProfileEdge::Arc {
