@@ -1,7 +1,7 @@
 use crate::world_graph::{graph, named};
 use opengeometry::exchange::StepExportReport;
 use opengeometry::world_graph::{
-    CopyOptions, CreateOptions, CreatingOperation, EditScope, ErrorCode, GraphError,
+    CopyOptions, CreateOptions, CreatingOperation, EditScope,
     ModifyingOperation, Plane, Primitive, StepOptions, Transform, WorldGraph,
 };
 
@@ -41,7 +41,6 @@ pub fn recut_scene() -> AcceptanceScene {
 
 pub fn acceptance_scene() -> AcceptanceScene {
     let mut scene = recut_scene();
-    let _ = attempt_rail_minus_wall(&mut scene);
     trial_rebuild(&mut scene);
     add_rail_instances(&mut scene);
     reparent_test_child(&mut scene.graph);
@@ -120,20 +119,6 @@ fn place_and_recut(scene: &mut AcceptanceScene) {
         .rebuild_operation(&scene.wall, rebuilt, EditScope::Node)
         .unwrap();
     subtract(graph, &scene.wall, &["door-cutter".into()]);
-}
-
-pub fn attempt_rail_minus_wall(scene: &mut AcceptanceScene) -> GraphError {
-    let error = scene
-        .graph
-        .operate(
-            &scene.rail,
-            ModifyingOperation::Subtract,
-            &[scene.wall.clone()],
-            EditScope::Node,
-        )
-        .unwrap_err();
-    assert_eq!(error.error_code(), ErrorCode::CoverageGap, "{error:?}");
-    error
 }
 
 fn trial_rebuild(scene: &mut AcceptanceScene) {

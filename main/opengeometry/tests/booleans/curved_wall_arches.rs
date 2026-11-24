@@ -17,8 +17,6 @@ const MISSES_SUPPORT_6_2: &str =
     r#"UnresolvedIntersection("face pair 6:2: intersection curve misses support")"#;
 const TANGENT_GUIDE: &str =
     r#"UnresolvedIntersection("trace guide is tangent to correction plane")"#;
-const ANALYTIC_GAP: &str =
-    r#"CoverageGap { families: ["generic analytic solid", "intersecting analytic solid"] }"#;
 
 #[derive(Clone, Copy)]
 struct Opening {
@@ -259,13 +257,13 @@ fn removed_volume(opening: Opening) -> f64 {
     sum * step / 3.0
 }
 
-fn assert_arch_cut(opening: Opening) {
+fn assert_arch_cut_by(opening: Opening, handler: &str) {
     let mut world = curved_wall(opening.radius);
     add_arch(&mut world, opening);
     subtract(&mut world, &["arch"]).unwrap();
     assert_eq!(
         world.report("wall").unwrap().unwrap()["handlers"],
-        serde_json::json!(["generic_two_sided_cutter_band_subtraction"])
+        serde_json::json!([handler])
     );
     let body = world.brep("wall").unwrap();
     body.validate().unwrap();
@@ -279,6 +277,10 @@ fn assert_arch_cut(opening: Opening) {
     let wall = PI * opening.radius * THICKNESS * WALL_HEIGHT / 2.0;
     let expected = wall - removed_volume(opening);
     assert_volume(volume::estimate(&body, 1e-4), expected, "arch cut");
+}
+
+fn assert_arch_cut(opening: Opening) {
+    assert_arch_cut_by(opening, "generic_two_sided_cutter_band_subtraction");
 }
 
 #[test]
@@ -400,9 +402,8 @@ fn radius_2_width_0_8_arch_prism_cuts_the_wall() {
 }
 
 #[test]
-fn radius_2_width_1_0_arch_prism_is_refused_with_a_coverage_gap() {
-    let opening = Opening::window(2.0, 1.0);
-    assert_arch_refused(opening, ErrorCode::CoverageGap, ANALYTIC_GAP);
+fn radius_2_width_1_0_arch_prism_cuts_the_wall_through_the_general_boolean() {
+    assert_arch_cut_by(Opening::window(2.0, 1.0), "general_boolean");
 }
 
 #[test]
@@ -416,9 +417,8 @@ fn radius_3_width_0_8_arch_prism_cuts_the_wall() {
 }
 
 #[test]
-fn radius_3_width_1_0_arch_prism_is_refused_with_a_coverage_gap() {
-    let opening = Opening::window(3.0, 1.0);
-    assert_arch_refused(opening, ErrorCode::CoverageGap, ANALYTIC_GAP);
+fn radius_3_width_1_0_arch_prism_cuts_the_wall_through_the_general_boolean() {
+    assert_arch_cut_by(Opening::window(3.0, 1.0), "general_boolean");
 }
 
 #[test]

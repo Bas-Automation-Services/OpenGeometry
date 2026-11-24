@@ -58,19 +58,30 @@ impl CurveRef<'_> {
         if self.periodic() {
             t += ((near - t) / TAU).round() * TAU;
         }
+        let ends = self.ends();
         for _ in 0..32 {
             let tangent = self.tangent(t)?;
             let speed = dot(tangent, tangent);
             if speed == 0.0 {
                 break;
             }
-            let step = dot(sub(p, self.point(t)?), tangent) / speed;
-            t += step;
+            let next = t + dot(sub(p, self.point(t)?), tangent) / speed;
+            let next = ends.map_or(next, |[lo, hi]| next.clamp(lo, hi));
+            let step = next - t;
+            t = next;
             if step.abs() <= 1e-15 * t.abs().max(1.0) {
                 break;
             }
         }
         Ok(t)
+    }
+
+    fn ends(&self) -> Option<[f64; 2]> {
+        let CurveGeometry::Intersection { definition } = *self.geometry() else {
+            return None;
+        };
+        let anchors = &self.store.intersections[definition as usize].anchors;
+        Some([anchors.first()?.parameter, anchors.last()?.parameter])
     }
 }
 

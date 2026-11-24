@@ -9,6 +9,7 @@ mod cuboids;
 mod cuboids_curved_cuts;
 mod cylinders_coaxial;
 mod cylinders_noncoaxial;
+mod general_band;
 mod general_steel;
 mod generic;
 mod planar_batch;

@@ -189,6 +189,7 @@ fn torus_minus_a_crossing_cuboid_is_a_coverage_gap_naming_the_torus_and_cuboid()
             "generic_single_closed_loop_boolean",
             "generic_non_intersecting_boolean",
             "prismatic_curved_boolean",
+            "general_boolean",
         ]
     );
 }

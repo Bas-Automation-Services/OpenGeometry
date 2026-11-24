@@ -4,7 +4,7 @@ use opengeometry::world_graph::{
     Transform, WorldGraph,
 };
 use opengeometry_test_support::volume;
-use opengeometry_test_support::world_graph::{graph, named};
+use opengeometry_test_support::world_graph::{assert_cut_keeps_volume, graph, named};
 
 struct Tool {
     og_id: &'static str,
@@ -234,57 +234,35 @@ fn mixed_cutter_batch_gap_never_falls_back() {
 }
 
 #[test]
-fn mixed_cutter_batch_gap_names_the_failing_cylindrical_step_gap() {
+fn mixed_cutter_batch_cuts_its_cylindrical_step_through_the_general_boolean() {
     let mut world = wall_with(&OVERLAPPING_DOORS[..1]);
     add_round(&mut world, 4.8, 80.0);
     let tools = ["first", "round"].map(String::from);
-    let error = world
+    let mark = world.mark().unwrap();
+    world
+        .operate(
+            "wall",
+            ModifyingOperation::Subtract,
+            &tools[..1],
+            EditScope::Node,
+        )
+        .unwrap();
+    assert_cut_keeps_volume(&mut world, "wall", "round");
+    world.rollback(mark).unwrap();
+    world.release(mark).unwrap();
+    world
         .operate(
             "wall",
             ModifyingOperation::Subtract,
             &tools,
             EditScope::Node,
         )
-        .unwrap_err();
-    assert_eq!(error.error_code(), ErrorCode::CoverageGap);
-    assert!(
-        error.message().contains("cylindrical stage"),
-        "{}",
-        error.message()
-    );
-    let ErrorDetails::Operate {
-        attempted,
-        families,
-        ..
-    } = error.details()
-    else {
-        panic!("{error:?}");
-    };
+        .unwrap();
+    let report = world.report("wall").unwrap().unwrap();
     assert_eq!(
-        families,
-        Some(Box::new([
-            "canonical aligned cuboid".into(),
-            "canonical aligned cuboid".into()
-        ]))
+        report["handlers"].as_array().unwrap().last().unwrap(),
+        "general_boolean"
     );
-    let expected = [
-        "subtract_planar_cutters",
-        "subtract_planar_cutters",
-        "separate_boolean",
-        "boolean_boxes",
-        "boolean_planar_extrusions",
-        "boolean_rectilinear",
-        "separate_boolean",
-        "cylinder_box_boolean",
-        "subtract_vertical_arc_extrusion",
-        "subtract_half_space_from_arc_extrusion",
-        "generic_two_sided_cutter_band_subtraction",
-        "generic_multiple_closed_loops_boolean",
-        "generic_single_closed_loop_boolean",
-        "generic_non_intersecting_boolean",
-        "prismatic_curved_boolean",
-    ];
-    assert_eq!(attempted, expected.map(String::from).to_vec());
 }
 
 #[test]
