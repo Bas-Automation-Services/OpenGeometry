@@ -1,6 +1,7 @@
 use super::handler_id::HandlerId;
 use super::trace::{record_handler, record_optional, Trace};
 use crate::brep::{BrepEnvelope, GeometryError, SurfaceGeometry};
+use crate::operations::modifying::boolean::general::general_boolean;
 use crate::operations::modifying::boolean::handlers::{
     boolean_boxes, boolean_cylinders, boolean_planar_extrusions, boolean_planar_polyhedra,
     boolean_rectilinear, boolean_spheres, conic_box_containment, conic_containment_boolean,
@@ -350,12 +351,19 @@ pub(super) fn generic_boolean(
             Err(error) => return Err(error),
         }
     }
-    Err(GeometryError::CoverageGap {
-        families: [
-            "generic analytic solid".into(),
-            "intersecting analytic solid".into(),
-        ],
-    })
+    match record_handler(trace, HandlerId::GeneralBoolean, || {
+        general_boolean(a, b, operation, id)
+    }) {
+        Err(GeometryError::CoverageGap { .. } | GeometryError::UnresolvedIntersection(_)) => {
+            Err(GeometryError::CoverageGap {
+                families: [
+                    "generic analytic solid".into(),
+                    "intersecting analytic solid".into(),
+                ],
+            })
+        }
+        result => result,
+    }
 }
 
 fn prismatic_after_error(

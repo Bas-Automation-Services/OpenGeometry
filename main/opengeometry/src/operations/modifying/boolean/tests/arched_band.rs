@@ -267,18 +267,17 @@ fn arched_cutter_reaching_the_top_cap_is_a_coverage_gap() {
 }
 
 #[test]
-fn arched_cutter_ending_inside_the_wall_is_a_coverage_gap() {
-    let (result, _) = boolean_brep_outcome_with_handlers(
+fn arched_cutter_ending_inside_the_wall_is_a_blind_opening() {
+    let (result, handlers) = boolean_brep_outcome_with_handlers(
         &ring(),
         &arched_cutter(0.0, 2.85, 0.4, SPRING),
         BooleanOp::Subtraction,
         "arched-blind".into(),
     );
-    assert!(
-        matches!(result, Err(GeometryError::CoverageGap { .. })),
-        "{:?}",
-        result.err()
-    );
+    assert_eq!(handlers.last().map(String::as_str), Some("general_boolean"));
+    let result = result.unwrap().brep;
+    result.validate().unwrap();
+    assert!(measured(&result) < measured(&ring()));
 }
 
 fn coverage_gap(host: &BrepEnvelope, cutter: &BrepEnvelope) -> bool {

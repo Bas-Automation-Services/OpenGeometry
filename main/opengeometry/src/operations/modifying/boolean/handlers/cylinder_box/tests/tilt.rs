@@ -1,5 +1,5 @@
 use super::support::{assert_kept, cylinder_with, Cut, R};
-use crate::brep::{fine_accuracy, BrepEnvelope, Frame3, GeometryError};
+use crate::brep::{fine_accuracy, BrepEnvelope, Frame3};
 use crate::math::{scale, sub};
 use crate::operations::modifying::boolean::dispatch::{
     boolean_brep_outcome_with_handlers, boolean_brep_with_handlers,
@@ -96,15 +96,11 @@ fn cuboid_across_or_along_the_axis_keeps_its_handler() {
 }
 
 #[test]
-fn tilted_cuboid_and_cylinder_union_stays_a_coverage_gap() {
+fn tilted_cuboid_and_cylinder_union_builds_through_the_general_boolean() {
     let cylinder = host();
     let cuboid = tilted_cuboid(45.0);
     let (result, handlers) =
         boolean_brep_outcome_with_handlers(&cylinder, &cuboid, BooleanOp::Union, "out".into());
-    assert!(handlers.is_empty(), "{handlers:?}");
-    assert!(
-        matches!(result, Err(GeometryError::CoverageGap { .. })),
-        "{:?}",
-        result.map(|_| ())
-    );
+    assert_eq!(handlers, ["general_boolean"]);
+    result.unwrap().brep.validate().unwrap();
 }

@@ -21,11 +21,12 @@ const LAYERS: [(&str, usize); 12] = [
 ];
 const TEST_FIXTURE_LAYERS: usize = 7;
 const BOOLEAN: [&str; 3] = ["operations", "modifying", "boolean"];
-const BOOLEAN_ORDER: [&str; 8] = [
+const BOOLEAN_ORDER: [&str; 9] = [
     "types",
     "operands",
     "assembly",
     "handlers",
+    "general",
     "dispatch",
     "batch",
     "multi_tool",
@@ -273,7 +274,7 @@ fn test_code_imports_world_graph_and_bindings_only_from_inside_them() {
 
 #[test]
 fn boolean_stages_import_only_earlier_stages() {
-    enforce_on_import_edges("boolean order types > operands > assembly > handlers > dispatch > batch > multi_tool > shell", boolean_order_violations, None);
+    enforce_on_import_edges("boolean order types > operands > assembly > handlers > general > dispatch > batch > multi_tool > shell", boolean_order_violations, None);
 }
 
 fn enforce_on_import_edges(
